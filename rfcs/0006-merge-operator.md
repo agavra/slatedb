@@ -112,7 +112,7 @@ trait MergeOperator {
     pub fn merge(
         &self,
         key: Bytes,
-        existing_value: Bytes,
+        existing_value: Option<Bytes>,
         value: Bytes
     ) -> Result<Bytes, MergeOperatorError>;
 }
@@ -130,7 +130,7 @@ impl MergeOperator for MyMergeOperator {
     fn merge(
         &self,
         key: Bytes,
-        existing_value: Bytes,
+        existing_value: Option<Bytes>,
         value: Bytes
     ) -> Result<Bytes, MergeOperatorError> {
         if key.starts_with(b"list:") {
