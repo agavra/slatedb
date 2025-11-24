@@ -196,7 +196,9 @@ impl WalBufferManager {
 
         let inner = self.inner.write();
         for entry in entries {
-            inner.current_wal.put(entry.clone());
+            // WAL is temporary storage - no eager merging needed here.
+            // Merging happens when WAL entries are applied to memtable.
+            inner.current_wal.put(entry.clone(), 0, None);
         }
         Ok(inner.current_wal.clone())
     }
@@ -535,7 +537,7 @@ mod tests {
             MonotonicSeq::new(0),
             MonotonicSeq::new(0),
         ));
-        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest())));
+        let db_state = Arc::new(RwLock::new(DbState::new(new_dirty_manifest(), None)));
         let wal_buffer = Arc::new(WalBufferManager::new(
             wal_id_store,
             db_state.clone(),

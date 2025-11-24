@@ -199,7 +199,10 @@ impl DbInner {
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         let guard = self.state.read();
         let memtable = guard.memtable();
-        entries.into_iter().for_each(|entry| memtable.put(entry));
+        let recent_snapshot_min_seq = guard.state().core().recent_snapshot_min_seq;
+        entries
+            .into_iter()
+            .for_each(|entry| memtable.put(entry, recent_snapshot_min_seq));
         memtable.table().durable_watcher()
     }
 

@@ -306,6 +306,7 @@ impl SortedRun {
 pub(crate) struct DbState {
     memtable: WritableKVTable,
     state: Arc<COWDbState>,
+    merge_operator: Option<crate::merge_operator::MergeOperatorType>,
 
     /// If the database is closed, this will contain the result of the close operation.
     /// Otherwise, it will be None.
@@ -430,13 +431,17 @@ impl DbStateReader for DbStateView {
 }
 
 impl DbState {
-    pub fn new(manifest: DirtyObject<Manifest>) -> Self {
+    pub fn new(
+        manifest: DirtyObject<Manifest>,
+        merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+    ) -> Self {
         Self {
-            memtable: WritableKVTable::new(),
+            memtable: WritableKVTable::new(merge_operator.clone()),
             state: Arc::new(COWDbState {
                 imm_memtable: VecDeque::new(),
                 manifest,
             }),
+            merge_operator,
             closed_result: WatchableOnceCell::new(),
         }
     }
@@ -471,7 +476,10 @@ impl DbState {
                 Err(e) => Err(e.clone()),
             };
         }
-        let old_memtable = std::mem::replace(&mut self.memtable, WritableKVTable::new());
+        let old_memtable = std::mem::replace(
+            &mut self.memtable,
+            WritableKVTable::new(self.merge_operator.clone()),
+        );
         self.modify(|modifier| {
             modifier
                 .state
@@ -600,7 +608,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_new_checkpoints() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(new_dirty_manifest(), None);
         // mimic an externally added checkpoint
         let mut updated_state = new_dirty_manifest();
         updated_state.value.core = db_state.state.core().clone();
@@ -627,7 +635,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_l0s_up_to_last_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(new_dirty_manifest(), None);
         add_l0s_to_dbstate(&mut db_state, 4);
         // mimic the compactor popping off l0s
         let mut compactor_state = new_dirty_manifest();
@@ -654,7 +662,7 @@ mod tests {
     #[test]
     fn test_should_merge_db_state_with_all_l0s_if_none_compacted() {
         // given:
-        let mut db_state = DbState::new(new_dirty_manifest());
+        let mut db_state = DbState::new(new_dirty_manifest(), None);
         add_l0s_to_dbstate(&mut db_state, 4);
         let l0s = db_state.state.core().l0.clone();
 

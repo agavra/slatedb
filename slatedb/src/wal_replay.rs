@@ -206,7 +206,7 @@ impl WalReplayIterator<'_> {
             return Ok(None);
         }
 
-        let table = WritableKVTable::new();
+        let table = WritableKVTable::new(None);
         let mut last_wal_id = 0;
 
         if let Some(overflow_row) = self.overflow_row.take() {
@@ -215,7 +215,7 @@ impl WalReplayIterator<'_> {
                 self.last_tick = self.last_tick.max(ts);
             }
             self.last_seq = self.last_seq.max(row_entry.seq);
-            table.put(row_entry);
+            table.put(row_entry, 0); // WAL replay: no snapshots exist during replay
             last_wal_id = overflow_row.wal_id;
         }
 
@@ -243,7 +243,7 @@ impl WalReplayIterator<'_> {
                         self.last_tick = self.last_tick.max(ts);
                     }
                     self.last_seq = self.last_seq.max(row_entry.seq);
-                    table.put(row_entry);
+                    table.put(row_entry, 0); // WAL replay: no snapshots exist during replay
                 }
 
                 let table_overflowed = self.overflow_row.is_some();
@@ -381,7 +381,7 @@ mod tests {
         .await
         .unwrap();
 
-        let full_replayed_table = WritableKVTable::new();
+        let full_replayed_table = WritableKVTable::new(None);
         let mut last_wal_id = 0;
         let mut replayed_entries = 0;
 
@@ -396,7 +396,7 @@ mod tests {
 
             let mut iter = replayed_table.table.table().iter();
             while let Some(next_entry) = iter.next_entry().await.unwrap() {
-                full_replayed_table.put(next_entry);
+                full_replayed_table.put(next_entry, 0); // Test: no snapshots needed
             }
         }
         assert_eq!(last_wal_id + 1, next_wal_id);
@@ -434,7 +434,7 @@ mod tests {
         .await
         .unwrap();
 
-        let full_replayed_table = WritableKVTable::new();
+        let full_replayed_table = WritableKVTable::new(None);
         let mut last_wal_id = 0;
 
         while let Some(replayed_table) = replay_iter.next().await.unwrap() {
@@ -443,7 +443,7 @@ mod tests {
 
             let mut iter = replayed_table.table.table().iter();
             while let Some(next_entry) = iter.next_entry().await.unwrap() {
-                full_replayed_table.put(next_entry);
+                full_replayed_table.put(next_entry, 0); // Test: no snapshots needed
             }
         }
         assert_eq!(last_wal_id + 1, next_wal_id);

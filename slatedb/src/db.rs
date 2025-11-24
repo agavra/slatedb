@@ -132,7 +132,7 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let state = Arc::new(RwLock::new(DbState::new(manifest)));
+        let state = Arc::new(RwLock::new(DbState::new(manifest, merge_operator.clone())));
 
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -218,7 +218,7 @@ impl DbInner {
         let mut empty_wal_id = next_wal_id;
 
         loop {
-            let empty_wal = WritableKVTable::new();
+            let empty_wal = WritableKVTable::new(self.reader.merge_operator.clone());
             match self
                 .flush_imm_table(
                     &SsTableId::Wal(empty_wal_id),
@@ -3631,11 +3631,11 @@ mod tests {
         let memtable = {
             let lock = kv_store.inner.state.read();
             lock.memtable()
-                .put(RowEntry::new_value(b"abc1111", b"value1111", 1));
+                .put(RowEntry::new_value(b"abc1111", b"value1111", 1), 0);
             lock.memtable()
-                .put(RowEntry::new_value(b"abc2222", b"value2222", 2));
+                .put(RowEntry::new_value(b"abc2222", b"value2222", 2), 0);
             lock.memtable()
-                .put(RowEntry::new_value(b"abc3333", b"value3333", 3));
+                .put(RowEntry::new_value(b"abc3333", b"value3333", 3), 0);
             lock.memtable().table().clone()
         };
 

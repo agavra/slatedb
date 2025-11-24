@@ -461,15 +461,15 @@ mod tests {
         /// Add entries to the memtable
         fn add_to_memtable(&mut self, entries: Vec<RowEntry>) {
             for entry in entries {
-                self.memtable.put(entry);
+                self.memtable.put(entry, 0, None); // Test helper: no watermark check needed
             }
         }
 
         /// Create an immutable memtable from entries
         fn add_immutable_memtable(&mut self, entries: Vec<RowEntry>) {
-            let writable = crate::mem_table::WritableKVTable::new();
+            let writable = crate::mem_table::WritableKVTable::new(None);
             for entry in entries {
-                writable.put(entry);
+                writable.put(entry, 0); // Test helper: no watermark check needed
             }
             let imm = Arc::new(ImmutableMemtable::new(writable, 0));
             self.imm_memtable.push_back(imm);
