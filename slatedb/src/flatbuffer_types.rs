@@ -200,9 +200,11 @@ impl FlatBufferManifestCodec {
             let sst_id = Compacted(man_sst.id().ulid());
 
             let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
+            // Default to format_version 1 when reading from manifest (backward compat)
             let l0_sst = SsTableHandle::new_compacted(
                 sst_id,
                 sst_info,
+                1,
                 man_sst.visible_range().map(Self::decode_bytes_range),
             );
             l0.push_back(l0_sst);
@@ -213,9 +215,11 @@ impl FlatBufferManifestCodec {
             for manifest_sst in manifest_sr.ssts().iter() {
                 let id = Compacted(manifest_sst.id().ulid());
                 let info = FlatBufferSsTableInfoCodec::sst_info(&manifest_sst.info());
+                // Default to format_version 1 when reading from manifest (backward compat)
                 ssts.push(SsTableHandle::new_compacted(
                     id,
                     info,
+                    1,
                     manifest_sst.visible_range().map(Self::decode_bytes_range),
                 ));
             }
@@ -865,6 +869,7 @@ mod tests {
                     first_key: Some(Bytes::copy_from_slice(first_key)),
                     ..Default::default()
                 },
+                1,
                 visible_range,
             )
         }

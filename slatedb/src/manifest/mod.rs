@@ -545,6 +545,7 @@ mod tests {
                     first_key: Some(entry.first_key.clone()),
                     ..SsTableInfo::default()
                 },
+                1,
                 entry.visible_range.clone(),
             ));
         }
@@ -560,6 +561,7 @@ mod tests {
                                 first_key: Some(entry.first_key.clone()),
                                 ..SsTableInfo::default()
                             },
+                            1,
                             entry.visible_range.clone(),
                         )
                     })

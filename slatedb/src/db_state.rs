@@ -30,6 +30,9 @@ pub struct SsTableHandle {
     /// Metadata information about this SSTable.
     pub info: SsTableInfo,
 
+    /// The SST format version.
+    pub(crate) format_version: u16,
+
     /// The range of keys that are visible to the user. If non-empty, this handle represents a projection
     /// over the SST file.
     pub(crate) visible_range: Option<BytesRange>,
@@ -50,7 +53,7 @@ impl Debug for SsTableHandle {
 }
 
 impl SsTableHandle {
-    pub(crate) fn new(id: SsTableId, info: SsTableInfo) -> Self {
+    pub(crate) fn new(id: SsTableId, info: SsTableInfo, format_version: u16) -> Self {
         let effective_range = match info.first_key.clone() {
             Some(physical_first_key) => BytesRange::new(Included(physical_first_key), Unbounded),
             None => BytesRange::new_empty(),
@@ -59,6 +62,7 @@ impl SsTableHandle {
         SsTableHandle {
             id,
             info,
+            format_version,
             visible_range: None,
             effective_range,
         }
@@ -67,6 +71,7 @@ impl SsTableHandle {
     pub(crate) fn new_compacted(
         id: SsTableId,
         info: SsTableInfo,
+        format_version: u16,
         visible_range: Option<BytesRange>,
     ) -> Self {
         let mut effective_range = match info.first_key.clone() {
@@ -89,13 +94,19 @@ impl SsTableHandle {
         SsTableHandle {
             id,
             info,
+            format_version,
             visible_range,
             effective_range,
         }
     }
 
     pub(crate) fn with_visible_range(&self, visible_range: BytesRange) -> Self {
-        Self::new_compacted(self.id, self.info.clone(), Some(visible_range))
+        Self::new_compacted(
+            self.id,
+            self.info.clone(),
+            self.format_version,
+            Some(visible_range),
+        )
     }
 
     /// The range of keys that are visible to the user.
@@ -732,8 +743,11 @@ mod tests {
                 .freeze_memtable(i as u64)
                 .expect("db in error state");
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
-            let handle =
-                SsTableHandle::new(SsTableId::Compacted(ulid::Ulid::new()), dummy_info.clone());
+            let handle = SsTableHandle::new(
+                SsTableId::Compacted(ulid::Ulid::new()),
+                dummy_info.clone(),
+                1,
+            );
             db_state.modify(|modifier| {
                 modifier.state.manifest.value.core.l0.push_front(handle);
                 modifier.state.manifest.value.core.replay_after_wal_id =
@@ -795,7 +809,7 @@ mod tests {
     fn create_compacted_sst_handle(first_key: Option<Bytes>) -> SsTableHandle {
         let sst_info = create_sst_info(first_key);
         let sst_id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableHandle::new(sst_id, sst_info.clone())
+        SsTableHandle::new(sst_id, sst_info.clone(), 1)
     }
 
     fn create_sst_info(first_key: Option<Bytes>) -> SsTableInfo {

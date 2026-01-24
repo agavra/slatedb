@@ -20,7 +20,7 @@ use crate::filter::BloomFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
-use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat};
+use crate::sst::{EncodedSsTable, EncodedSsTableBuilder, SsTableFormat, SST_FORMAT_VERSION};
 use crate::types::RowEntry;
 use crate::{blob::ReadOnlyBlob, block::Block};
 
@@ -219,7 +219,11 @@ impl TableStore {
         }
         self.cache_filter(*id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle::new(*id, encoded_sst.info))
+        Ok(SsTableHandle::new(
+            *id,
+            encoded_sst.info,
+            SST_FORMAT_VERSION,
+        ))
     }
 
     async fn cache_filter(&self, sst: SsTableId, id: u64, filter: Option<Arc<BloomFilter>>) {
@@ -294,8 +298,17 @@ impl TableStore {
         let object_store = self.object_stores.store_for(id);
         let path = self.path(id);
         let obj = ReadOnlyObject { object_store, path };
-        let info = self.sst_format.read_info(&obj).await?;
-        Ok(SsTableHandle::new(*id, info))
+        let (info, format_version) = self.sst_format.read_info(&obj).await?;
+        Ok(SsTableHandle::new(*id, info, format_version))
+    }
+
+    /// Read only the format version from an SST file's footer.
+    /// This is a lightweight operation that only reads the last 10 bytes.
+    pub(crate) async fn read_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
+        let object_store = self.object_stores.store_for(id);
+        let path = self.path(id);
+        let obj = ReadOnlyObject { object_store, path };
+        self.sst_format.read_version(&obj).await
     }
 
     /// Reads the Bloom filter of an SSTable.
@@ -568,7 +581,11 @@ impl EncodedSsTableWriter<'_> {
         self.table_store
             .cache_filter(self.id, encoded_sst.info.filter_offset, encoded_sst.filter)
             .await;
-        Ok(SsTableHandle::new(self.id, encoded_sst.info))
+        Ok(SsTableHandle::new(
+            self.id,
+            encoded_sst.info,
+            SST_FORMAT_VERSION,
+        ))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {

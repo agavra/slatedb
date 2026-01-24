@@ -2426,8 +2426,8 @@ mod tests {
             ..SsTableInfo::default()
         };
         dirty.value.core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(SsTableId::Compacted(l0_newest), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_oldest), l0_info.clone()),
+            SsTableHandle::new(SsTableId::Compacted(l0_newest), l0_info.clone(), 1),
+            SsTableHandle::new(SsTableId::Compacted(l0_oldest), l0_info.clone(), 1),
         ]);
         dirty.value.core.compacted = vec![
             SortedRun {
@@ -2435,6 +2435,7 @@ mod tests {
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     sr_info.clone(),
+                    1,
                 )],
             },
             SortedRun {
@@ -2442,6 +2443,7 @@ mod tests {
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     sr_info.clone(),
+                    1,
                 )],
             },
         ];
@@ -2521,8 +2523,8 @@ mod tests {
             ..SsTableInfo::default()
         };
         core.l0 = VecDeque::from(vec![
-            SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone()),
-            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info.clone()),
+            SsTableHandle::new(SsTableId::Compacted(l0_first), l0_info.clone(), 1),
+            SsTableHandle::new(SsTableId::Compacted(l0_second), l0_info.clone(), 1),
         ]);
         core.compacted = vec![
             SortedRun {
@@ -2530,6 +2532,7 @@ mod tests {
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     sr_info.clone(),
+                    1,
                 )],
             },
             SortedRun {
@@ -2537,6 +2540,7 @@ mod tests {
                 ssts: vec![SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     sr_info.clone(),
+                    1,
                 )],
             },
         ];

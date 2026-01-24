@@ -101,36 +101,55 @@ impl Default for SsTableFormat {
 }
 
 impl SsTableFormat {
-    pub(crate) async fn read_info(
-        &self,
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<SsTableInfo, SlateDBError> {
-        let obj_len = obj.len().await?;
-        if obj_len <= NUM_FOOTER_BYTES_LONG {
-            return Err(SlateDBError::EmptySSTable);
-        }
-        // Get the size of the metadata
-        let header = obj
-            .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
-            .await?;
-        assert!(header.len() == NUM_FOOTER_BYTES);
-
-        // Last 2 bytes of the header represent the version
-        let version = header.slice(8..NUM_FOOTER_BYTES).get_u16();
-        // TODO: Support older and newer versions
+    /// Parses and validates the format version from the SST footer bytes.
+    fn parse_version(footer: &Bytes) -> Result<u16, SlateDBError> {
+        assert!(footer.len() == NUM_FOOTER_BYTES);
+        let version = footer.slice(8..NUM_FOOTER_BYTES).get_u16();
         if version != SST_FORMAT_VERSION {
             return Err(SlateDBError::InvalidVersion {
                 expected_version: SST_FORMAT_VERSION,
                 actual_version: version,
             });
         }
+        Ok(version)
+    }
 
-        // First 8 bytes of the header represent the metadata offset
-        let sst_metadata_offset = header.slice(0..8).get_u64();
+    /// Reads the SST footer (last 10 bytes) from the blob.
+    async fn read_footer(obj: &impl ReadOnlyBlob) -> Result<Bytes, SlateDBError> {
+        let obj_len = obj.len().await?;
+        if obj_len <= NUM_FOOTER_BYTES_LONG {
+            return Err(SlateDBError::EmptySSTable);
+        }
+        let footer = obj
+            .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)
+            .await?;
+        Ok(footer)
+    }
+
+    /// Read SST info and format version from an SST file.
+    /// Returns (SsTableInfo, format_version).
+    pub(crate) async fn read_info(
+        &self,
+        obj: &impl ReadOnlyBlob,
+    ) -> Result<(SsTableInfo, u16), SlateDBError> {
+        let obj_len = obj.len().await?;
+        let footer = Self::read_footer(obj).await?;
+        let version = Self::parse_version(&footer)?;
+
+        // First 8 bytes of the footer represent the metadata offset
+        let sst_metadata_offset = footer.slice(0..8).get_u64();
         let sst_metadata_bytes = obj
             .read_range(sst_metadata_offset..obj_len - NUM_FOOTER_BYTES_LONG)
             .await?;
-        SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)
+        let info = SsTableInfo::decode(sst_metadata_bytes, &*self.sst_codec)?;
+        Ok((info, version))
+    }
+
+    /// Reads only the format version from the SST footer.
+    /// This is a lightweight operation that only reads the last 10 bytes.
+    pub(crate) async fn read_version(&self, obj: &impl ReadOnlyBlob) -> Result<u16, SlateDBError> {
+        let footer = Self::read_footer(obj).await?;
+        Self::parse_version(&footer)
     }
 
     pub(crate) async fn read_filter(
@@ -1421,7 +1440,9 @@ mod tests {
         };
         let result = format.read_info(&valid_blob).await;
         match result {
-            Ok(_) => {}
+            Ok((_, version)) => {
+                assert_eq!(version, SST_FORMAT_VERSION);
+            }
             Err(e) => {
                 panic!("Expected Ok result, but got error: {:?}", e);
             }
