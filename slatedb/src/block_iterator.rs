@@ -6,12 +6,12 @@ use crate::iter::IterationOrder::Ascending;
 use crate::row_codec::SstRowCodecV0;
 use crate::{block::Block, error::SlateDBError, iter::KeyValueIterator, types::RowEntry};
 use async_trait::async_trait;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::Bytes;
 use IterationOrder::Descending;
 
 pub(crate) trait BlockLike: Send + Sync {
     fn data(&self) -> &Bytes;
-    fn offsets(&self) -> &[u16];
+    fn restarts(&self) -> &[u16];
 }
 
 impl BlockLike for Block {
@@ -19,8 +19,8 @@ impl BlockLike for Block {
         &self.data
     }
 
-    fn offsets(&self) -> &[u16] {
-        &self.offsets
+    fn restarts(&self) -> &[u16] {
+        &self.restarts
     }
 }
 
@@ -29,8 +29,8 @@ impl BlockLike for &Block {
         &self.data
     }
 
-    fn offsets(&self) -> &[u16] {
-        &self.offsets
+    fn restarts(&self) -> &[u16] {
+        &self.restarts
     }
 }
 
@@ -39,17 +39,23 @@ impl BlockLike for Arc<Block> {
         &self.data
     }
 
-    fn offsets(&self) -> &[u16] {
-        &self.offsets
+    fn restarts(&self) -> &[u16] {
+        &self.restarts
     }
 }
 
 pub(crate) struct BlockIterator<B: BlockLike> {
     block: B,
-    off_off: usize,
-    // first key in the block, because slateDB does not support multi version of keys
-    // so we use `Bytes` temporarily
-    first_key: Bytes,
+    /// Byte offset within the block data for forward iteration
+    entry_offset: usize,
+    /// Index into the block for counting entries (used for descending iteration)
+    entry_index: usize,
+    /// Total number of entries in the block (computed lazily for descending)
+    num_entries: Option<usize>,
+    /// Current key cached for prefix restoration
+    current_key: Bytes,
+    /// Current restart index (which restart interval we're in)
+    current_restart_idx: usize,
     ordering: IterationOrder,
 }
 
@@ -60,30 +66,31 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     }
 
     async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        let result = self.load_at_current_off();
-        match result {
-            Ok(None) => Ok(None),
-            Ok(key_value) => {
-                self.advance();
-                Ok(key_value)
-            }
-            Err(e) => Err(e),
+        match self.ordering {
+            Ascending => self.next_entry_ascending(),
+            Descending => self.next_entry_descending(),
         }
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        let num_entries = self.block.offsets().len();
-        if num_entries == 0 {
+        let num_restarts = self.block.restarts().len();
+        if num_restarts == 0 {
             return Ok(());
         }
 
-        // Binary search to find the first key >= next_key
-        let mut low = self.off_off;
-        let mut high = num_entries;
+        // Forward-only seek: if current position is already >= target, don't go backwards
+        if !self.current_key.is_empty() && self.current_key.as_ref() >= next_key {
+            return Ok(());
+        }
+
+        // Binary search on restart points to find the interval containing the target key
+        // Start from current restart index for forward-only seeking
+        let mut low = self.current_restart_idx;
+        let mut high = num_restarts;
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let mid_key = self.decode_key_at_index(mid)?;
+            let mid_key = self.decode_key_at_restart(mid)?;
 
             match mid_key.as_ref().cmp(next_key) {
                 Ordering::Less => {
@@ -95,17 +102,83 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
             }
         }
 
-        self.off_off = low;
+        // Position at the restart point before or at the target
+        // If low > current_restart_idx, we need to seek to a later restart point
+        // Otherwise stay at current restart interval and scan forward
+        let restart_idx = if low > self.current_restart_idx {
+            if low > 0 {
+                low - 1
+            } else {
+                0
+            }
+        } else {
+            self.current_restart_idx
+        };
+
+        // Only seek to restart if it's ahead of our current position
+        if restart_idx > self.current_restart_idx {
+            self.seek_to_restart(restart_idx)?;
+        }
+
+        // Linear scan within the restart interval to find the exact position
+        loop {
+            if self.entry_offset >= self.block.data().len() {
+                break;
+            }
+
+            // If current key is already >= target, we're done
+            if self.current_key.as_ref() >= next_key {
+                break;
+            }
+
+            // Decode next entry to advance position
+            let mut cursor = self.block.data().slice(self.entry_offset..);
+            let codec = SstRowCodecV0::new();
+            let prev_key = self.current_key.clone();
+            let sst_row = codec.decode(&mut cursor)?;
+            let entry_len = self.block.data().len() - self.entry_offset - cursor.len();
+            self.entry_offset += entry_len;
+            self.entry_index += 1;
+            self.current_key = sst_row.restore_full_key(&prev_key);
+
+            // Update restart index if we've crossed into a new restart interval
+            let restarts = self.block.restarts();
+            while self.current_restart_idx + 1 < restarts.len()
+                && self.entry_offset >= restarts[self.current_restart_idx + 1] as usize
+            {
+                self.current_restart_idx += 1;
+            }
+
+            // Check if we've reached or passed the target
+            if self.current_key.as_ref() >= next_key {
+                // Back up one entry - we need to return this one
+                self.entry_offset -= entry_len;
+                self.entry_index -= 1;
+                self.current_key = prev_key;
+                break;
+            }
+        }
+
         Ok(())
     }
 }
 
 impl<B: BlockLike> BlockIterator<B> {
     pub(crate) fn new(block: B, ordering: IterationOrder) -> Self {
+        // Decode first key at first restart point (always starts at offset 0)
+        let first_key = if block.data().is_empty() {
+            Bytes::new()
+        } else {
+            Self::decode_first_key_static(block.data())
+        };
+
         BlockIterator {
-            first_key: BlockIterator::decode_first_key(&block),
             block,
-            off_off: 0,
+            entry_offset: 0,
+            entry_index: 0,
+            num_entries: None,
+            current_key: first_key,
+            current_restart_idx: 0,
             ordering,
         }
     }
@@ -114,31 +187,41 @@ impl<B: BlockLike> BlockIterator<B> {
         Self::new(block, Ascending)
     }
 
-    fn advance(&mut self) {
-        self.off_off += 1;
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
-        self.off_off >= self.block.offsets().len()
+        self.entry_offset >= self.block.data().len()
     }
 
-    fn load_at_current_off(&self) -> Result<Option<RowEntry>, SlateDBError> {
-        if self.is_empty() {
+    /// Get the next entry in ascending order
+    fn next_entry_ascending(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if self.entry_offset >= self.block.data().len() {
             return Ok(None);
         }
-        let off_off = match self.ordering {
-            Ascending => self.off_off,
-            Descending => self.block.offsets().len() - 1 - self.off_off,
-        };
 
-        let off = self.block.offsets()[off_off];
-        let off_usz = off as usize;
-        // TODO: bounds checks to avoid panics? (paulgb)
-        let mut cursor = self.block.data().slice(off_usz..);
+        let mut cursor = self.block.data().slice(self.entry_offset..);
         let codec = SstRowCodecV0::new();
         let sst_row = codec.decode(&mut cursor)?;
+
+        // Restore full key using current_key as prefix
+        let full_key = sst_row.restore_full_key(&self.current_key);
+
+        // Calculate how many bytes we consumed
+        let entry_len = self.block.data().len() - self.entry_offset - cursor.len();
+        self.entry_offset += entry_len;
+        self.entry_index += 1;
+
+        // Update current_key for the next entry
+        self.current_key = full_key.clone();
+
+        // Update restart index if we've crossed into a new restart interval
+        let restarts = self.block.restarts();
+        while self.current_restart_idx + 1 < restarts.len()
+            && self.entry_offset >= restarts[self.current_restart_idx + 1] as usize
+        {
+            self.current_restart_idx += 1;
+        }
+
         Ok(Some(RowEntry::new(
-            sst_row.restore_full_key(&self.first_key),
+            full_key,
             sst_row.value,
             sst_row.seq,
             sst_row.create_ts,
@@ -146,30 +229,110 @@ impl<B: BlockLike> BlockIterator<B> {
         )))
     }
 
-    fn decode_first_key(block: &B) -> Bytes {
-        let mut buf = block.data().slice(..);
-        let overlap_len = buf.get_u16() as usize;
-        assert_eq!(overlap_len, 0, "first key overlap should be 0");
-        let key_len = buf.get_u16() as usize;
-        let first_key = &buf[..key_len];
-        Bytes::copy_from_slice(first_key)
+    /// Get the next entry in descending order
+    fn next_entry_descending(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        // For descending iteration, we need to know total number of entries
+        // We compute this lazily by scanning the block once
+        if self.num_entries.is_none() {
+            self.num_entries = Some(self.count_entries()?);
+            // Reset to scan from beginning to target position
+            self.entry_offset = 0;
+            self.entry_index = 0;
+            self.current_key = Self::decode_first_key_static(self.block.data());
+            self.current_restart_idx = 0;
+        }
+
+        let total = self.num_entries.unwrap();
+        if self.entry_index >= total {
+            return Ok(None);
+        }
+
+        // Target index for descending: total - 1, total - 2, etc.
+        let target_idx = total - 1 - self.entry_index;
+
+        // Reset to beginning and scan to target position
+        let mut scan_offset = 0;
+        let mut scan_key = Self::decode_first_key_static(self.block.data());
+        let mut result_entry = None;
+
+        let codec = SstRowCodecV0::new();
+        for i in 0..=target_idx {
+            let mut cursor = self.block.data().slice(scan_offset..);
+            let sst_row = codec.decode(&mut cursor)?;
+            let full_key = sst_row.restore_full_key(&scan_key);
+
+            if i == target_idx {
+                result_entry = Some(RowEntry::new(
+                    full_key.clone(),
+                    sst_row.value,
+                    sst_row.seq,
+                    sst_row.create_ts,
+                    sst_row.expire_ts,
+                ));
+            }
+
+            let entry_len = self.block.data().len() - scan_offset - cursor.len();
+            scan_offset += entry_len;
+            scan_key = full_key;
+        }
+
+        self.entry_index += 1;
+        Ok(result_entry)
     }
 
-    /// Decodes just the key at the given offset index without parsing the full row.
-    /// This is more efficient for binary search where we only need to compare keys.
-    fn decode_key_at_index(&self, index: usize) -> Result<Bytes, SlateDBError> {
-        let off = self.block.offsets()[index] as usize;
-        let mut cursor = self.block.data().slice(off..);
+    /// Count total entries in the block by scanning through
+    fn count_entries(&self) -> Result<usize, SlateDBError> {
+        let mut count = 0;
+        let mut offset = 0;
+        let mut prev_key = Self::decode_first_key_static(self.block.data());
+        let codec = SstRowCodecV0::new();
 
-        let key_prefix_len = cursor.get_u16() as usize;
-        let key_suffix_len = cursor.get_u16() as usize;
-        let key_suffix = &cursor[..key_suffix_len];
+        while offset < self.block.data().len() {
+            let mut cursor = self.block.data().slice(offset..);
+            let sst_row = codec.decode(&mut cursor)?;
+            let full_key = sst_row.restore_full_key(&prev_key);
+            let entry_len = self.block.data().len() - offset - cursor.len();
+            offset += entry_len;
+            prev_key = full_key;
+            count += 1;
+        }
+        Ok(count)
+    }
 
-        // Reconstruct the full key from first_key prefix + suffix
-        let mut full_key = BytesMut::with_capacity(key_prefix_len + key_suffix_len);
-        full_key.extend_from_slice(&self.first_key[..key_prefix_len]);
-        full_key.extend_from_slice(key_suffix);
-        Ok(full_key.freeze())
+    /// Decode the first key in the block (at offset 0)
+    fn decode_first_key_static(data: &Bytes) -> Bytes {
+        let mut cursor = data.slice(..);
+        let codec = SstRowCodecV0::new();
+        // The first entry has key_prefix_len = 0, so we can decode it with empty prefix
+        let sst_row = codec
+            .decode(&mut cursor)
+            .expect("Failed to decode first key");
+        sst_row.restore_full_key(&Bytes::new())
+    }
+
+    /// Decode the key at a restart point (for binary search)
+    fn decode_key_at_restart(&self, restart_idx: usize) -> Result<Bytes, SlateDBError> {
+        let restart_offset = self.block.restarts()[restart_idx] as usize;
+        let mut cursor = self.block.data().slice(restart_offset..);
+        let codec = SstRowCodecV0::new();
+        // At restart points, key_prefix_len = 0, so we can decode with empty prefix
+        let sst_row = codec.decode(&mut cursor)?;
+        Ok(sst_row.restore_full_key(&Bytes::new()))
+    }
+
+    /// Seek to a specific restart point
+    fn seek_to_restart(&mut self, restart_idx: usize) -> Result<(), SlateDBError> {
+        let restart_offset = self.block.restarts()[restart_idx] as usize;
+        self.entry_offset = restart_offset;
+        self.current_restart_idx = restart_idx;
+
+        // Decode the key at this restart point
+        let mut cursor = self.block.data().slice(restart_offset..);
+        let codec = SstRowCodecV0::new();
+        let sst_row = codec.decode(&mut cursor)?;
+        self.current_key = sst_row.restore_full_key(&Bytes::new());
+
+        Ok(())
     }
 }
 
@@ -512,8 +675,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_decode_key_at_index_correctly() {
-        // given: a block with entries that have shared prefixes
+    async fn should_decode_key_at_restart_correctly() {
+        // given: a block with entries where first entry is at a restart point
         let mut block_builder = BlockBuilder::new(4096);
         assert!(block_builder.add_value(b"prefix_aaa", b"1", gen_empty_attrs()));
         assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
@@ -521,15 +684,36 @@ mod tests {
         let block = block_builder.build().unwrap();
         let iter = BlockIterator::new_ascending(&block);
 
-        // when: decoding keys at each index
-        // then: full keys are correctly reconstructed
-        let key0 = iter.decode_key_at_index(0).unwrap();
+        // when: decoding the key at restart point 0
+        // then: first key is correctly decoded
+        let key0 = iter.decode_key_at_restart(0).unwrap();
         assert_eq!(key0.as_ref(), b"prefix_aaa");
 
-        let key1 = iter.decode_key_at_index(1).unwrap();
-        assert_eq!(key1.as_ref(), b"prefix_bbb");
+        // With restart interval of 16 and only 3 entries, there's only 1 restart point
+        assert_eq!(block.restarts.len(), 1);
+    }
 
-        let key2 = iter.decode_key_at_index(2).unwrap();
-        assert_eq!(key2.as_ref(), b"prefix_ccc");
+    #[tokio::test]
+    async fn should_iterate_all_entries_with_prefix_encoding() {
+        // given: a block with entries that have shared prefixes
+        let mut block_builder = BlockBuilder::new(4096);
+        assert!(block_builder.add_value(b"prefix_aaa", b"1", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
+        assert!(block_builder.add_value(b"prefix_ccc", b"3", gen_empty_attrs()));
+        let block = block_builder.build().unwrap();
+        let mut iter = BlockIterator::new_ascending(&block);
+
+        // when: iterating through all entries
+        // then: full keys are correctly reconstructed from prefix encoding
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"prefix_aaa", b"1");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"prefix_bbb", b"2");
+
+        let kv = iter.next().await.unwrap().unwrap();
+        test_utils::assert_kv(&kv, b"prefix_ccc", b"3");
+
+        assert!(iter.next().await.unwrap().is_none());
     }
 }

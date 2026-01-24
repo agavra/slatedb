@@ -234,6 +234,209 @@ impl SstRowCodecV0 {
         // decode value
         let value_len = data.get_u32() as usize;
         let value = data.slice(..value_len);
+        data.advance(value_len);
+        Ok(SstRowEntry {
+            key_prefix_len,
+            key_suffix,
+            seq,
+            expire_ts,
+            create_ts,
+            value: if flags.contains(RowFlags::MERGE_OPERAND) {
+                ValueDeletable::Merge(value)
+            } else {
+                ValueDeletable::Value(value)
+            },
+        })
+    }
+
+    fn decode_flags(&self, flags: u8) -> Result<RowFlags, SlateDBError> {
+        let parsed =
+            RowFlags::from_bits(flags).ok_or_else(|| SlateDBError::InvalidRowFlags {
+                encoded_bits: flags,
+                known_bits: RowFlags::all().bits(),
+                message: "Unable to parse flags. This may be caused by reading data encoded with a newer codec.".to_string(),
+            })?;
+        if parsed.contains(RowFlags::TOMBSTONE | RowFlags::MERGE_OPERAND) {
+            return Err(SlateDBError::InvalidRowFlags {
+                encoded_bits: parsed.bits(),
+                known_bits: RowFlags::all().bits(),
+                message: "Tombstone and Merge Operand are mutually exclusive.".to_string(),
+            });
+        }
+        Ok(parsed)
+    }
+}
+
+/// Encode a u64 as a varint (unsigned LEB128) into the output buffer.
+/// Returns the number of bytes written.
+fn encode_varint(output: &mut Vec<u8>, mut value: u64) -> usize {
+    let mut bytes_written = 0;
+    loop {
+        let mut byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80; // Set continuation bit
+        }
+        output.push(byte);
+        bytes_written += 1;
+        if value == 0 {
+            break;
+        }
+    }
+    bytes_written
+}
+
+/// Decode a varint (unsigned LEB128) from the input buffer.
+/// Returns the decoded value.
+pub(crate) fn decode_varint(data: &mut Bytes) -> Result<u64, SlateDBError> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    loop {
+        if data.is_empty() {
+            return Err(SlateDBError::EmptyBlock);
+        }
+        let byte = data.get_u8();
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(SlateDBError::EmptyBlock); // Overflow
+        }
+    }
+    Ok(result)
+}
+
+/// Encodes key and value using the binary codec for SlateDB row representation
+/// using the `v1` encoding scheme with varint lengths.
+///
+/// The `v1` codec for the key is (for non-tombstones):
+///
+/// ```txt
+///  |-------------------------------------------------------------------------------------------------------------------|
+///  |   varint       |     varint     |  var        | u64     | u8        | i64       | i64       | varint    |  var    |
+///  |----------------|----------------|-------------|---------|-----------|-----------|-----------|-----------|---------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq     | flags     | expire_ts | create_ts | value_len | value   |
+///  |-------------------------------------------------------------------------------------------------------------------|
+/// ```
+///
+/// And for tombstones (flags & Tombstone == 1):
+///
+///  ```txt
+///  |-------------------------------------------------------------------|
+///  |   varint       |     varint     |  var        | u64      | u8     |
+///  |----------------|----------------|-------------|----------|--------|
+///  | key_prefix_len | key_suffix_len |  key_suffix | seq      | flags  |
+///  |-------------------------------------------------------------------|
+///  ```
+///
+/// | Field            | Type     | Description                                         |
+/// |------------------|----------|-----------------------------------------------------|
+/// | `key_prefix_len` | `varint` | Length of the key prefix (variable-length encoded)  |
+/// | `key_suffix_len` | `varint` | Length of the key suffix (variable-length encoded)  |
+/// | `key_suffix`     | `var`    | Suffix of the key                                   |
+/// | `seq`            | `u64`    | Sequence Number                                     |
+/// | `flags`          | `u8`     | Flags of the row                                    |
+/// | `expire_ts`      | `i64`    | Optional, only has value when flags & HAS_EXPIRE_TS |
+/// | `create_ts`      | `i64`    | Optional, only has value when flags & HAS_CREATE_TS |
+/// | `value_len`      | `varint` | Length of the value (variable-length encoded)       |
+/// | `value`          | `var`    | Value bytes                                         |
+pub(crate) struct SstRowCodecV1 {}
+
+impl SstRowCodecV1 {
+    pub(crate) fn new() -> Self {
+        Self {}
+    }
+
+    /// Estimate encoded size for V1 codec.
+    /// Varints use 1 byte for values < 128, 2 bytes for < 16384, etc.
+    /// We estimate 2 bytes per varint as a reasonable average.
+    #[allow(dead_code)]
+    pub(crate) fn estimate_encoded_size(entry_num: usize, estimated_entries_size: usize) -> usize {
+        // Average varint size estimate: ~2 bytes for typical key/value lengths
+        let key_prefix_len_size = 2;
+        let key_suffix_len_size = 2;
+        let value_len_size = 2;
+        let flag_size = std::mem::size_of::<u8>();
+        let mut ans = estimated_entries_size;
+        ans += (key_prefix_len_size + key_suffix_len_size + value_len_size + flag_size) * entry_num;
+        ans
+    }
+
+    pub(crate) fn encode(&self, output: &mut Vec<u8>, row: &SstRowEntry) {
+        encode_varint(output, row.key_prefix_len as u64);
+        encode_varint(output, row.key_suffix.len() as u64);
+        output.put(row.key_suffix.as_ref());
+
+        // encode seq & flags
+        let flags = row.flags();
+        output.put_u64(row.seq);
+        output.put_u8(flags.bits());
+
+        // encode expire & create ts
+        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+            output.put_i64(
+                row.expire_ts
+                    .expect("expire_ts should be set with HAS_EXPIRE_TS"),
+            );
+        }
+        if flags.contains(RowFlags::HAS_CREATE_TS) {
+            output.put_i64(
+                row.create_ts
+                    .expect("create_ts should be set with HAS_CREATE_TS"),
+            );
+        }
+
+        match &row.value {
+            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => {
+                encode_varint(output, v.len() as u64);
+                output.put(v.as_ref());
+            }
+            ValueDeletable::Tombstone => {
+                // skip encoding value for tombstone
+            }
+        }
+    }
+
+    pub(crate) fn decode(&self, data: &mut Bytes) -> Result<SstRowEntry, SlateDBError> {
+        let key_prefix_len = decode_varint(data)? as usize;
+        let key_suffix_len = decode_varint(data)? as usize;
+        let key_suffix = data.slice(..key_suffix_len);
+        data.advance(key_suffix_len);
+
+        // decode seq & flags
+        let seq = data.get_u64();
+        let flags = self.decode_flags(data.get_u8())?;
+
+        // decode expire_ts & create_ts
+        let (expire_ts, create_ts) =
+            if flags.contains(RowFlags::HAS_EXPIRE_TS | RowFlags::HAS_CREATE_TS) {
+                (Some(data.get_i64()), Some(data.get_i64()))
+            } else if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+                (Some(data.get_i64()), None)
+            } else if flags.contains(RowFlags::HAS_CREATE_TS) {
+                (None, Some(data.get_i64()))
+            } else {
+                (None, None)
+            };
+
+        // skip decoding value for tombstone.
+        if flags.contains(RowFlags::TOMBSTONE) {
+            return Ok(SstRowEntry {
+                key_prefix_len,
+                key_suffix,
+                seq,
+                create_ts,
+                expire_ts: None,
+                value: ValueDeletable::Tombstone,
+            });
+        }
+
+        // decode value
+        let value_len = decode_varint(data)? as usize;
+        let value = data.slice(..value_len);
+        data.advance(value_len);
         Ok(SstRowEntry {
             key_prefix_len,
             key_suffix,
