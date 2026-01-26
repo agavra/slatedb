@@ -15,7 +15,7 @@ use crate::filter::{self, BloomFilter};
 use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::{
     block::Block,
-    block_iterator::BlockIterator,
+    block_iterator::V2BlockIterator,
     iter::{init_optional_iterator, KeyValueIterator},
     partitioned_keyspace,
     tablestore::TableStore,
@@ -102,7 +102,7 @@ impl SstView<'_> {
 
 struct IteratorState {
     initialized: bool,
-    current_iter: Option<BlockIterator<Arc<Block>>>,
+    current_iter: Option<V2BlockIterator<Arc<Block>>>,
 }
 
 impl IteratorState {
@@ -121,7 +121,7 @@ impl IteratorState {
         self.initialized
     }
 
-    fn advance(&mut self, iterator: BlockIterator<Arc<Block>>) {
+    fn advance(&mut self, iterator: V2BlockIterator<Arc<Block>>) {
         self.initialized = true;
         self.current_iter = Some(iterator);
     }
@@ -401,7 +401,7 @@ impl<'a> InternalSstIterator<'a> {
     async fn next_iter(
         &mut self,
         spawn_fetches: bool,
-    ) -> Result<Option<BlockIterator<Arc<Block>>>, SlateDBError> {
+    ) -> Result<Option<V2BlockIterator<Arc<Block>>>, SlateDBError> {
         if self.index.is_none() {
             return Ok(None);
         }
@@ -417,7 +417,7 @@ impl<'a> InternalSstIterator<'a> {
                     }
                     FetchTask::Finished(blocks) => {
                         if let Some(block) = blocks.pop_front() {
-                            return Ok(Some(BlockIterator::new_ascending(block)));
+                            return Ok(Some(V2BlockIterator::new_ascending(block)));
                         } else {
                             self.fetch_tasks.pop_front();
                         }

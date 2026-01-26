@@ -21,7 +21,7 @@ use crate::utils::compute_index_key;
 use crate::{blob::ReadOnlyBlob, config::CompressionCodec};
 use crate::{block::BlockBuilder, error::SlateDBError};
 
-pub(crate) const SST_FORMAT_VERSION: u16 = 1;
+pub(crate) const SST_FORMAT_VERSION: u16 = 2;
 
 // 8 bytes for the metadata offset + 2 bytes for the version
 const NUM_FOOTER_BYTES: usize = 10;
@@ -100,12 +100,16 @@ impl Default for SsTableFormat {
     }
 }
 
+// Minimum supported SST format version (for backward compatibility)
+const MIN_SUPPORTED_SST_VERSION: u16 = 1;
+
 impl SsTableFormat {
     /// Parses and validates the format version from the SST footer bytes.
+    /// Accepts versions from MIN_SUPPORTED_SST_VERSION to SST_FORMAT_VERSION (inclusive).
     fn parse_version(footer: &Bytes) -> Result<u16, SlateDBError> {
         assert!(footer.len() == NUM_FOOTER_BYTES);
         let version = footer.slice(8..NUM_FOOTER_BYTES).get_u16();
-        if version != SST_FORMAT_VERSION {
+        if version < MIN_SUPPORTED_SST_VERSION || version > SST_FORMAT_VERSION {
             return Err(SlateDBError::InvalidVersion {
                 expected_version: SST_FORMAT_VERSION,
                 actual_version: version,

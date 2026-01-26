@@ -9,12 +9,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use IterationOrder::Descending;
 
-pub(crate) trait BlockLike: Send + Sync {
+pub(crate) trait BlockLikeV2: Send + Sync {
     fn data(&self) -> &Bytes;
     fn restarts(&self) -> &[u16];
 }
 
-impl BlockLike for Block {
+impl BlockLikeV2 for Block {
     fn data(&self) -> &Bytes {
         &self.data
     }
@@ -24,7 +24,7 @@ impl BlockLike for Block {
     }
 }
 
-impl BlockLike for &Block {
+impl BlockLikeV2 for &Block {
     fn data(&self) -> &Bytes {
         &self.data
     }
@@ -34,7 +34,7 @@ impl BlockLike for &Block {
     }
 }
 
-impl BlockLike for Arc<Block> {
+impl BlockLikeV2 for Arc<Block> {
     fn data(&self) -> &Bytes {
         &self.data
     }
@@ -44,7 +44,7 @@ impl BlockLike for Arc<Block> {
     }
 }
 
-pub(crate) struct BlockIterator<B: BlockLike> {
+pub(crate) struct V2BlockIterator<B: BlockLikeV2> {
     block: B,
     /// Byte offset within the block data for forward iteration
     entry_offset: usize,
@@ -60,7 +60,7 @@ pub(crate) struct BlockIterator<B: BlockLike> {
 }
 
 #[async_trait]
-impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
+impl<B: BlockLikeV2> KeyValueIterator for V2BlockIterator<B> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
@@ -163,7 +163,7 @@ impl<B: BlockLike> KeyValueIterator for BlockIterator<B> {
     }
 }
 
-impl<B: BlockLike> BlockIterator<B> {
+impl<B: BlockLikeV2> V2BlockIterator<B> {
     pub(crate) fn new(block: B, ordering: IterationOrder) -> Self {
         // Decode first key at first restart point (always starts at offset 0)
         let first_key = if block.data().is_empty() {
@@ -172,7 +172,7 @@ impl<B: BlockLike> BlockIterator<B> {
             Self::decode_first_key_static(block.data())
         };
 
-        BlockIterator {
+        V2BlockIterator {
             block,
             entry_offset: 0,
             entry_index: 0,
@@ -183,6 +183,7 @@ impl<B: BlockLike> BlockIterator<B> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_ascending(block: B) -> Self {
         Self::new(block, Ascending)
     }
@@ -338,8 +339,8 @@ impl<B: BlockLike> BlockIterator<B> {
 
 #[cfg(test)]
 mod tests {
+    use super::V2BlockIterator;
     use crate::block::BlockBuilder;
-    use crate::block_iterator::BlockIterator;
     use crate::bytes_range::BytesRange;
     use crate::iter::KeyValueIterator;
     use crate::proptest_util::{arbitrary, sample};
@@ -356,7 +357,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"donkey", b"kong");
         let kv = iter.next().await.unwrap().unwrap();
@@ -373,7 +374,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"kratos").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
@@ -389,7 +390,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"ka").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"kratos", b"atreus");
@@ -405,7 +406,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"zzz").await.unwrap();
         assert!(iter.next().await.unwrap().is_none());
     }
@@ -417,7 +418,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = V2BlockIterator::new_ascending(block);
         assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"s").await.unwrap();
         assert_iterator(&mut iter, vec![RowEntry::new_value(b"super", b"mario", 0)]).await;
@@ -430,7 +431,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_empty_attrs()));
         assert!(block_builder.add_value(b"super", b"mario", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = V2BlockIterator::new_ascending(block);
         assert_next_entry(&mut iter, &RowEntry::new_value(b"donkey", b"kong", 0)).await;
         iter.seek(b"kratos").await.unwrap();
         assert_iterator(
@@ -450,7 +451,7 @@ mod tests {
         assert!(block_builder.add_value(b"kratos", b"atreus", gen_attrs(2)));
         assert!(block_builder.add_value(b"super", b"mario", gen_attrs(3)));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = V2BlockIterator::new_ascending(block);
         iter.seek(b"zelda".as_ref()).await.unwrap();
         assert_iterator(&mut iter, Vec::new()).await;
     }
@@ -469,7 +470,7 @@ mod tests {
 
         runner
             .run(&arbitrary::iteration_order(), |ordering| {
-                let mut iter = BlockIterator::new(block.clone(), ordering);
+                let mut iter = V2BlockIterator::new(block.clone(), ordering);
                 runtime.block_on(test_utils::assert_ranged_kv_scan(
                     &sample_table,
                     &BytesRange::from(..),
@@ -496,17 +497,17 @@ mod tests {
 
         // when: seeking to various keys
         // then: the correct entries are returned
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"key_00050").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"key_00050", b"value_50");
 
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"key_00099").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"key_00099", b"value_99");
 
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"key_00000").await.unwrap();
         let kv = iter.next().await.unwrap().unwrap();
         test_utils::assert_kv(&kv, b"key_00000", b"value_0");
@@ -522,7 +523,7 @@ mod tests {
         let block = block_builder.build().unwrap();
 
         // when: seeking to the first key
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"apple").await.unwrap();
 
         // then: the first entry is returned
@@ -540,7 +541,7 @@ mod tests {
         let block = block_builder.build().unwrap();
 
         // when: seeking to the last key
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"cherry").await.unwrap();
 
         // then: the last entry is returned and iteration ends
@@ -558,7 +559,7 @@ mod tests {
         let block = block_builder.build().unwrap();
 
         // when: seeking to a key before the first entry
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"apple").await.unwrap();
 
         // then: the first entry is returned
@@ -578,7 +579,7 @@ mod tests {
         let block = block_builder.build().unwrap();
 
         // when: seeking to various keys with shared prefixes
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"user:1001").await.unwrap();
 
         // then: correct entry is found
@@ -586,7 +587,7 @@ mod tests {
         test_utils::assert_kv(&kv, b"user:1001", b"bob");
 
         // when: seeking to a key between entries
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"user:1005").await.unwrap();
 
         // then: the next entry is returned
@@ -604,7 +605,7 @@ mod tests {
         assert!(block_builder.add_value(b"d", b"4", gen_empty_attrs()));
         assert!(block_builder.add_value(b"e", b"5", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = V2BlockIterator::new_ascending(block);
 
         // when/then: multiple sequential seeks work correctly
         iter.seek(b"b").await.unwrap();
@@ -629,7 +630,7 @@ mod tests {
         assert!(block_builder.add_value(b"c", b"3", gen_empty_attrs()));
         assert!(block_builder.add_value(b"d", b"4", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(block);
+        let mut iter = V2BlockIterator::new_ascending(block);
 
         // advance past "a" and "b"
         iter.next().await.unwrap();
@@ -651,7 +652,7 @@ mod tests {
         let block = block_builder.build().unwrap();
 
         // when: seeking to the exact key
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"only").await.unwrap();
 
         // then: the entry is returned
@@ -659,7 +660,7 @@ mod tests {
         test_utils::assert_kv(&kv, b"only", b"one");
 
         // when: seeking to a key before it
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"aaa").await.unwrap();
 
         // then: the entry is returned
@@ -667,7 +668,7 @@ mod tests {
         test_utils::assert_kv(&kv, b"only", b"one");
 
         // when: seeking to a key after it
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
         iter.seek(b"zzz").await.unwrap();
 
         // then: no entries remain
@@ -682,7 +683,7 @@ mod tests {
         assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"prefix_ccc", b"3", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let iter = BlockIterator::new_ascending(&block);
+        let iter = V2BlockIterator::new_ascending(&block);
 
         // when: decoding the key at restart point 0
         // then: first key is correctly decoded
@@ -701,7 +702,7 @@ mod tests {
         assert!(block_builder.add_value(b"prefix_bbb", b"2", gen_empty_attrs()));
         assert!(block_builder.add_value(b"prefix_ccc", b"3", gen_empty_attrs()));
         let block = block_builder.build().unwrap();
-        let mut iter = BlockIterator::new_ascending(&block);
+        let mut iter = V2BlockIterator::new_ascending(&block);
 
         // when: iterating through all entries
         // then: full keys are correctly reconstructed from prefix encoding
