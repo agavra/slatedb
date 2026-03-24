@@ -1,0 +1,12 @@
+[package]
+name = "scratch-metrics"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+opentelemetry = "0.31"
+opentelemetry_sdk = "0.31"
+prometheus-client = "0.24"
