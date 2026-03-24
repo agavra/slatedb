@@ -77,6 +77,7 @@ pub struct StatRegistry {
     stats: Mutex<BTreeMap<&'static str, Arc<dyn ReadableStat>>>,
 }
 
+#[allow(dead_code)]
 impl StatRegistry {
     pub(crate) fn new() -> Self {
         Self {

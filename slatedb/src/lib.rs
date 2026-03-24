@@ -33,7 +33,6 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
-pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 #[cfg(feature = "compaction_filters")]
 pub use compaction_filter::{
@@ -43,7 +42,6 @@ pub use compaction_filter::{
 pub use compactor::CompactorBuilder;
 pub use config::{Settings, SstBlockSize};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, WriteHandle};
-pub use db_cache::stats as db_cache_stats;
 pub use db_iter::DbIterator;
 pub use db_read::DbRead;
 pub use db_reader::DbReader;
@@ -51,7 +49,6 @@ pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
 pub use format::sst::BlockTransformer;
-pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::GarbageCollectorBuilder;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use rand::DbRand;
@@ -72,6 +69,7 @@ pub mod config;
 pub mod db_cache;
 pub mod db_stats;
 pub mod manifest;
+pub mod metrics;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
 pub mod stats;

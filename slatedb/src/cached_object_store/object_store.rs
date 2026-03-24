@@ -2,8 +2,8 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::storage_fs::FsCacheStorage;
 use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
+use crate::metrics::MetricsRecorder;
 use crate::rand::DbRand;
-use crate::stats::StatRegistry;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore};
@@ -20,7 +20,7 @@ use log::warn;
 
 use crate::utils::build_concurrent;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     pub(crate) part_size_bytes: usize, // expected to be aligned with mb or kb
@@ -30,6 +30,20 @@ pub(crate) struct CachedObjectStore {
     // Absolute path of the root folder relative to the bucket. See #1319.
     resolved_root: Arc<OnceCell<Path>>,
     stats: Arc<CachedObjectStoreStats>,
+}
+
+impl std::fmt::Debug for CachedObjectStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedObjectStore")
+            .field("object_store", &self.object_store)
+            .field("part_size_bytes", &self.part_size_bytes)
+            .field("cache_storage", &self.cache_storage)
+            .field("admission_picker", &self.admission_picker)
+            .field("cache_puts", &self.cache_puts)
+            .field("resolved_root", &self.resolved_root)
+            .field("stats", &"<CachedObjectStoreStats>")
+            .finish()
+    }
 }
 
 impl CachedObjectStore {
@@ -65,7 +79,7 @@ impl CachedObjectStore {
     pub(crate) async fn from_config(
         object_store: Arc<dyn ObjectStore>,
         options: &ObjectStoreCacheOptions,
-        stat_registry: &StatRegistry,
+        recorder: &dyn MetricsRecorder,
         clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<Option<Arc<Self>>, SlateDBError> {
@@ -73,7 +87,7 @@ impl CachedObjectStore {
             None => return Ok(None),
             Some(f) => f,
         };
-        let stats = Arc::new(CachedObjectStoreStats::new(stat_registry));
+        let stats = Arc::new(CachedObjectStoreStats::new(recorder));
         let cache_storage = Arc::new(FsCacheStorage::new(
             cache_root_folder.clone(),
             options.max_cache_size_bytes,
@@ -498,7 +512,7 @@ impl CachedObjectStore {
         let this = self.clone();
         let location = location.clone();
         Box::pin(async move {
-            this.stats.object_store_cache_part_access.inc();
+            this.stats.object_store_cache_part_access.increment(1);
 
             // Try local cache first.
             if let Some(cache_location) = this.cache_location_for(&location) {
@@ -507,7 +521,7 @@ impl CachedObjectStore {
                     .entry(&cache_location, this.part_size_bytes);
                 // Cache hit, so return immediately.
                 if let Ok(Some(bytes)) = entry.read_part(part_id, range_in_part.clone()).await {
-                    this.stats.object_store_cache_part_hits.inc();
+                    this.stats.object_store_cache_part_hits.increment(1);
                     return Ok(bytes);
                 }
             }
@@ -746,8 +760,8 @@ mod tests {
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
     use crate::cached_object_store::storage_fs::FsCacheEntry;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
+    use crate::metrics::DefaultMetricsRecorder;
     use crate::rand::DbRand;
-    use crate::stats::StatRegistry;
     use crate::test_utils::gen_rand_bytes;
     use slatedb_common::clock::DefaultSystemClock;
 
@@ -892,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn test_lazy_resolve_root_from_meta_location() -> object_store::Result<()> {
         let backing_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             new_test_cache_folder(),
@@ -950,7 +964,7 @@ mod tests {
             new_test_cache_folder(),
             None,
             None,
-            Arc::new(CachedObjectStoreStats::new(&StatRegistry::new())),
+            Arc::new(CachedObjectStoreStats::new(&DefaultMetricsRecorder::new())),
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
         ));
@@ -969,7 +983,7 @@ mod tests {
             cache_storage.clone(),
             1024,
             false,
-            Arc::new(CachedObjectStoreStats::new(&StatRegistry::new())),
+            Arc::new(CachedObjectStoreStats::new(&DefaultMetricsRecorder::new())),
         )
         .unwrap();
         let cached_b = CachedObjectStore::new(
@@ -977,7 +991,7 @@ mod tests {
             cache_storage.clone(),
             1024,
             false,
-            Arc::new(CachedObjectStoreStats::new(&StatRegistry::new())),
+            Arc::new(CachedObjectStoreStats::new(&DefaultMetricsRecorder::new())),
         )
         .unwrap();
 
@@ -1046,7 +1060,7 @@ mod tests {
             backing_store.clone(),
             Path::from("wrong/root"),
         ));
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             new_test_cache_folder(),
@@ -1083,7 +1097,7 @@ mod tests {
         let payload = gen_rand_bytes(1024 * 3 + 32);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         object_store
             .put(
@@ -1160,7 +1174,7 @@ mod tests {
         let payload = gen_rand_bytes(1024 * 3);
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         object_store
             .put(
@@ -1215,7 +1229,7 @@ mod tests {
     fn test_split_range_into_parts() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder,
@@ -1305,7 +1319,7 @@ mod tests {
     fn test_align_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder,
@@ -1328,7 +1342,7 @@ mod tests {
     fn test_align_get_range() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder,
@@ -1359,7 +1373,7 @@ mod tests {
     async fn test_cached_object_store_impl_object_store() -> object_store::Result<()> {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let test_cache_folder = new_test_cache_folder();
-        let stats_registry = StatRegistry::new();
+        let stats_registry = DefaultMetricsRecorder::new();
         let stats = Arc::new(CachedObjectStoreStats::new(&stats_registry));
         let cache_storage = Arc::new(FsCacheStorage::new(
             test_cache_folder.clone(),
@@ -1440,8 +1454,8 @@ mod tests {
     #[tokio::test]
     async fn test_preload_cache() {
         let cache_dir = new_test_cache_folder();
-        let stat_registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(CachedObjectStoreStats::new(&stat_registry));
+        let stat_registry = Arc::new(DefaultMetricsRecorder::new());
+        let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
         let cache_storage = Arc::new(FsCacheStorage::new(
             cache_dir,
             Some(10 * 1024 * 1024), // 10MB
@@ -1490,8 +1504,8 @@ mod tests {
     #[tokio::test]
     async fn test_preload_cache_above_limit() {
         let cache_dir = new_test_cache_folder();
-        let stat_registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(CachedObjectStoreStats::new(&stat_registry));
+        let stat_registry = Arc::new(DefaultMetricsRecorder::new());
+        let stats = Arc::new(CachedObjectStoreStats::new(stat_registry.as_ref()));
         let cache_storage = Arc::new(FsCacheStorage::new(
             cache_dir,
             Some(10 * 1024 * 1024), // 10MB

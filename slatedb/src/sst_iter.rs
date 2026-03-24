@@ -230,12 +230,12 @@ impl BloomFilterEvaluator {
             Some(filter) => {
                 if filter.might_contain(key_hash) {
                     if let Some(stats) = &self.db_stats {
-                        stats.sst_filter_positives.inc();
+                        stats.sst_filter_positives.increment(1);
                     }
                     self.state = FilterState::Positive;
                 } else {
                     if let Some(stats) = &self.db_stats {
-                        stats.sst_filter_negatives.inc();
+                        stats.sst_filter_negatives.increment(1);
                     }
                     self.state = FilterState::Negative;
                 }
@@ -259,7 +259,7 @@ impl BloomFilterEvaluator {
     fn notify_finished_iteration(&mut self) {
         if self.state == FilterState::Positive && !self.found_key && !self.false_positive_recorded {
             if let Some(stats) = &self.db_stats {
-                stats.sst_filter_false_positives.inc();
+                stats.sst_filter_false_positives.increment(1);
             }
             self.false_positive_recorded = true;
         }
@@ -897,6 +897,7 @@ impl RowEntryIterator for BloomFilterIterator<'_> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SstIteratorDelegate<'a> {
     Direct(InternalSstIterator<'a>),
     Bloom(BloomFilterIterator<'a>),
@@ -1107,9 +1108,9 @@ mod tests {
     use crate::db_stats::DbStats;
     use crate::filter;
     use crate::format::sst::SsTableFormat;
+    use crate::metrics::{DefaultMetricsRecorder, MetricValue};
     use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
-    use crate::stats::{ReadableStat, StatRegistry};
     use crate::test_utils::assert_kv;
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
@@ -1198,8 +1199,8 @@ mod tests {
     #[tokio::test]
     async fn should_record_bloom_filter_positive_for_single_key() {
         // given
-        let registry = StatRegistry::new();
-        let db_stats = DbStats::new(&registry);
+        let recorder = DefaultMetricsRecorder::new();
+        let db_stats = DbStats::new(&recorder);
         let table_store = bloom_filter_enabled_table_store(10);
         let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
 
@@ -1226,15 +1227,25 @@ mod tests {
             ValueDeletable::Value(value) => assert_eq!(value.as_ref(), b"v_k1"),
             other => panic!("expected value, found {other:?}"),
         }
-        assert_eq!(db_stats.sst_filter_positives.get(), 1);
-        assert_eq!(db_stats.sst_filter_false_positives.get(), 0);
+        let snapshot = recorder.snapshot();
+        let positives = match snapshot.by_name("slatedb.db.sst_filter_positive_count")[0].value {
+            MetricValue::Counter(v) => v,
+            _ => panic!("expected counter"),
+        };
+        let false_positives =
+            match snapshot.by_name("slatedb.db.sst_filter_false_positive_count")[0].value {
+                MetricValue::Counter(v) => v,
+                _ => panic!("expected counter"),
+            };
+        assert_eq!(positives, 1);
+        assert_eq!(false_positives, 0);
     }
 
     #[tokio::test]
     async fn should_record_bloom_filter_negative_for_missing_key() {
         // given
-        let registry = StatRegistry::new();
-        let db_stats = DbStats::new(&registry);
+        let recorder = DefaultMetricsRecorder::new();
+        let db_stats = DbStats::new(&recorder);
         let table_store = bloom_filter_enabled_table_store(10);
         let sst_handle = build_single_block_sst(&table_store, &[b"k1", b"k3"]).await;
 
@@ -1251,15 +1262,25 @@ mod tests {
 
         // then
         assert!(iter.is_none(), "negative bloom result should skip iterator");
-        assert_eq!(db_stats.sst_filter_negatives.get(), 1);
-        assert_eq!(db_stats.sst_filter_false_positives.get(), 0);
+        let snapshot = recorder.snapshot();
+        let negatives = match snapshot.by_name("slatedb.db.sst_filter_negative_count")[0].value {
+            MetricValue::Counter(v) => v,
+            _ => panic!("expected counter"),
+        };
+        let false_positives =
+            match snapshot.by_name("slatedb.db.sst_filter_false_positive_count")[0].value {
+                MetricValue::Counter(v) => v,
+                _ => panic!("expected counter"),
+            };
+        assert_eq!(negatives, 1);
+        assert_eq!(false_positives, 0);
     }
 
     #[tokio::test]
     async fn should_record_bloom_filter_false_positive_for_single_key() {
         // given
-        let registry = StatRegistry::new();
-        let db_stats = DbStats::new(&registry);
+        let recorder = DefaultMetricsRecorder::new();
+        let db_stats = DbStats::new(&recorder);
         let table_store = bloom_filter_enabled_table_store(2);
         // these keys share the same bucket in the bloom filter (hard coded)
         // after testing with the SIP13 algorithm. The collision key must be
@@ -1296,9 +1317,23 @@ mod tests {
 
         // then
         assert!(entry.is_none(), "false positive must return no entry");
-        assert_eq!(db_stats.sst_filter_positives.get(), 1);
-        assert_eq!(db_stats.sst_filter_false_positives.get(), 1);
-        assert_eq!(db_stats.sst_filter_negatives.get(), 0);
+        let snapshot = recorder.snapshot();
+        let positives = match snapshot.by_name("slatedb.db.sst_filter_positive_count")[0].value {
+            MetricValue::Counter(v) => v,
+            _ => panic!("expected counter"),
+        };
+        let false_positives =
+            match snapshot.by_name("slatedb.db.sst_filter_false_positive_count")[0].value {
+                MetricValue::Counter(v) => v,
+                _ => panic!("expected counter"),
+            };
+        let negatives = match snapshot.by_name("slatedb.db.sst_filter_negative_count")[0].value {
+            MetricValue::Counter(v) => v,
+            _ => panic!("expected counter"),
+        };
+        assert_eq!(positives, 1);
+        assert_eq!(false_positives, 1);
+        assert_eq!(negatives, 0);
     }
 
     #[tokio::test]

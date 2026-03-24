@@ -82,8 +82,8 @@ use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
 use crate::manifest::SsTableHandle;
 use crate::merge_operator::MergeOperatorType;
+use crate::metrics::MetricsRecorder;
 use crate::rand::DbRand;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
 use slatedb_common::clock::SystemClock;
@@ -279,7 +279,7 @@ impl Compactor {
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
-        stat_registry: Arc<StatRegistry>,
+        metrics_recorder: Arc<dyn MetricsRecorder>,
         system_clock: Arc<dyn SystemClock>,
         closed_result: ClosedResultWriter,
         merge_operator: Option<MergeOperatorType>,
@@ -287,7 +287,7 @@ impl Compactor {
             Arc<dyn CompactionFilterSupplier>,
         >,
     ) -> Self {
-        let stats = Arc::new(CompactionStats::new(stat_registry));
+        let stats = Arc::new(CompactionStats::new(metrics_recorder.as_ref()));
         let task_executor = Arc::new(MessageHandlerExecutor::new(
             closed_result,
             system_clock.clone(),
@@ -591,8 +591,8 @@ impl CompactorEventHandler {
 
         self.stats
             .total_bytes_being_compacted
-            .set(total_estimated_bytes);
-        self.stats.total_throughput.set(total_throughput as u64);
+            .set(total_estimated_bytes as f64);
+        self.stats.total_throughput.set(total_throughput);
     }
 
     /// Calculates the estimated total source bytes for a compaction.
@@ -931,7 +931,7 @@ impl CompactorEventHandler {
         self.maybe_start_compactions().await?;
         self.stats
             .last_compaction_ts
-            .set(self.system_clock.now().timestamp() as u64);
+            .set(self.system_clock.now().timestamp() as f64);
         Ok(())
     }
 
@@ -957,60 +957,46 @@ impl CompactorEventHandler {
 }
 
 pub mod stats {
-    use crate::stats::{Counter, Gauge, StatRegistry};
+    use crate::metrics::{CounterFn, GaugeFn, MetricsRecorder};
     use std::sync::Arc;
 
-    macro_rules! compactor_stat_name {
-        ($suffix:expr) => {
-            crate::stat_name!("compactor", $suffix)
-        };
-    }
-
-    pub const BYTES_COMPACTED: &str = compactor_stat_name!("bytes_compacted");
-    pub const LAST_COMPACTION_TS_SEC: &str = compactor_stat_name!("last_compaction_timestamp_sec");
-    pub const RUNNING_COMPACTIONS: &str = compactor_stat_name!("running_compactions");
-    pub const TOTAL_BYTES_BEING_COMPACTED: &str =
-        compactor_stat_name!("total_bytes_being_compacted");
-    pub const TOTAL_THROUGHPUT_BYTES_PER_SEC: &str =
-        compactor_stat_name!("total_throughput_bytes_per_sec");
-
     pub(crate) struct CompactionStats {
-        pub(crate) last_compaction_ts: Arc<Gauge<u64>>,
-        pub(crate) running_compactions: Arc<Gauge<i64>>,
-        pub(crate) bytes_compacted: Arc<Counter>,
-        pub(crate) total_bytes_being_compacted: Arc<Gauge<u64>>,
-        pub(crate) total_throughput: Arc<Gauge<u64>>,
+        pub(crate) last_compaction_ts: Arc<dyn GaugeFn>,
+        pub(crate) running_compactions: Arc<dyn GaugeFn>,
+        pub(crate) bytes_compacted: Arc<dyn CounterFn>,
+        pub(crate) total_bytes_being_compacted: Arc<dyn GaugeFn>,
+        pub(crate) total_throughput: Arc<dyn GaugeFn>,
     }
 
     impl CompactionStats {
-        /// Registers and returns a new set of compactor metrics in the provided registry.
-        ///
-        /// ## Metrics
-        /// - `last_compaction_timestamp_sec`: Unix timestamp of the last completed compaction.
-        /// - `running_compactions`: Gauge tracking active compaction attempts.
-        /// - `bytes_compacted`: Counter of bytes written by the executor.
-        /// - `total_bytes_being_compacted`: Total bytes across all running compactions.
-        /// - `total_throughput_bytes_per_sec`: Combined throughput across all running compactions.
-        pub(crate) fn new(stat_registry: Arc<StatRegistry>) -> Self {
-            let stats = Self {
-                last_compaction_ts: Arc::new(Gauge::default()),
-                running_compactions: Arc::new(Gauge::default()),
-                bytes_compacted: Arc::new(Counter::default()),
-                total_bytes_being_compacted: Arc::new(Gauge::default()),
-                total_throughput: Arc::new(Gauge::default()),
-            };
-            stat_registry.register(LAST_COMPACTION_TS_SEC, stats.last_compaction_ts.clone());
-            stat_registry.register(RUNNING_COMPACTIONS, stats.running_compactions.clone());
-            stat_registry.register(BYTES_COMPACTED, stats.bytes_compacted.clone());
-            stat_registry.register(
-                TOTAL_BYTES_BEING_COMPACTED,
-                stats.total_bytes_being_compacted.clone(),
-            );
-            stat_registry.register(
-                TOTAL_THROUGHPUT_BYTES_PER_SEC,
-                stats.total_throughput.clone(),
-            );
-            stats
+        pub(crate) fn new(recorder: &dyn MetricsRecorder) -> Self {
+            Self {
+                last_compaction_ts: recorder.register_gauge(
+                    "slatedb.compactor.last_compaction_timestamp_sec",
+                    "Unix timestamp of the last completed compaction",
+                    &[],
+                ),
+                running_compactions: recorder.register_gauge(
+                    "slatedb.compactor.running_compactions",
+                    "Number of active compaction attempts",
+                    &[],
+                ),
+                bytes_compacted: recorder.register_counter(
+                    "slatedb.compactor.bytes_compacted",
+                    "Bytes written by the compactor",
+                    &[],
+                ),
+                total_bytes_being_compacted: recorder.register_gauge(
+                    "slatedb.compactor.total_bytes_being_compacted",
+                    "Total bytes across all running compactions",
+                    &[],
+                ),
+                total_throughput: recorder.register_gauge(
+                    "slatedb.compactor.total_throughput_bytes_per_sec",
+                    "Combined throughput across all running compactions",
+                    &[],
+                ),
+            }
         }
     }
 }
@@ -1033,7 +1019,6 @@ mod tests {
     use super::*;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
-    use crate::compactor::stats::LAST_COMPACTION_TS_SEC;
     use crate::compactor_executor::{
         CompactionExecutor, TokioCompactionExecutor, TokioCompactionExecutorOptions,
     };
@@ -1053,10 +1038,10 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::Manifest;
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
+    use crate::metrics::{DefaultMetricsRecorder, MetricValue};
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
-    use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
     use crate::types::KeyValue;
@@ -2361,9 +2346,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_track_total_bytes_and_throughput() {
-        use crate::compactor::stats::{
-            TOTAL_BYTES_BEING_COMPACTED, TOTAL_THROUGHPUT_BYTES_PER_SEC,
-        };
         use chrono::DateTime;
 
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
@@ -2400,18 +2382,19 @@ mod tests {
 
         fixture.handler.handle_log_ticker();
 
-        let total_bytes = fixture
-            .stats_registry
-            .lookup(TOTAL_BYTES_BEING_COMPACTED)
-            .unwrap()
-            .get();
+        let snapshot = fixture.metrics_recorder.snapshot();
+        let total_bytes =
+            match snapshot.by_name("slatedb.compactor.total_bytes_being_compacted")[0].value {
+                MetricValue::Gauge(v) => v as i64,
+                _ => panic!("expected gauge"),
+            };
         assert_eq!(total_bytes, 0);
 
-        let throughput = fixture
-            .stats_registry
-            .lookup(TOTAL_THROUGHPUT_BYTES_PER_SEC)
-            .unwrap()
-            .get();
+        let throughput =
+            match snapshot.by_name("slatedb.compactor.total_throughput_bytes_per_sec")[0].value {
+                MetricValue::Gauge(v) => v as i64,
+                _ => panic!("expected gauge"),
+            };
         assert!(
             throughput > 0,
             "Expected throughput > 0, got {}",
@@ -2448,18 +2431,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_track_running_compactions_count() {
-        use crate::compactor::stats::RUNNING_COMPACTIONS;
-
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
-        assert_eq!(
-            fixture
-                .stats_registry
-                .lookup(RUNNING_COMPACTIONS)
-                .unwrap()
-                .get(),
-            0
-        );
+        let snapshot = fixture.metrics_recorder.snapshot();
+        let running = match snapshot.by_name("slatedb.compactor.running_compactions")[0].value {
+            MetricValue::Gauge(v) => v as i64,
+            _ => panic!("expected gauge"),
+        };
+        assert_eq!(running, 0);
 
         let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(vec![], 10));
         fixture
@@ -2705,7 +2684,7 @@ mod tests {
         executor: Arc<MockExecutor>,
         real_executor: Arc<dyn CompactionExecutor>,
         real_executor_rx: tokio::sync::mpsc::UnboundedReceiver<CompactorMessage>,
-        stats_registry: Arc<StatRegistry>,
+        metrics_recorder: Arc<DefaultMetricsRecorder>,
         handler: CompactorEventHandler,
     }
 
@@ -2726,8 +2705,8 @@ mod tests {
             let executor = Arc::new(MockExecutor::new());
             let (real_executor_tx, real_executor_rx) = tokio::sync::mpsc::unbounded_channel();
             let rand = Arc::new(DbRand::default());
-            let stats_registry = Arc::new(StatRegistry::new());
-            let compactor_stats = Arc::new(CompactionStats::new(stats_registry.clone()));
+            let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+            let compactor_stats = Arc::new(CompactionStats::new(metrics_recorder.as_ref()));
             let real_executor = Arc::new(TokioCompactionExecutor::new(
                 TokioCompactionExecutorOptions {
                     handle: Handle::current(),
@@ -2769,7 +2748,7 @@ mod tests {
                 executor,
                 real_executor_rx,
                 real_executor,
-                stats_registry,
+                metrics_recorder,
                 handler,
             }
         }
@@ -2840,11 +2819,18 @@ mod tests {
         })
         .await
         .expect("timeout waiting for CompactionJobAttemptFinished");
-        let starting_last_ts = fixture
-            .stats_registry
-            .lookup(LAST_COMPACTION_TS_SEC)
-            .unwrap()
-            .get();
+        let starting_last_ts = {
+            let snapshot = fixture.metrics_recorder.snapshot();
+            let metric = snapshot
+                .by_name("slatedb.compactor.last_compaction_timestamp_sec")
+                .into_iter()
+                .next()
+                .expect("metric not found");
+            match &metric.value {
+                MetricValue::Gauge(v) => *v,
+                other => panic!("expected Gauge, got {:?}", other),
+            }
+        };
 
         // when:
         fixture
@@ -2854,14 +2840,19 @@ mod tests {
             .expect("fatal error handling compaction message");
 
         // then:
-        assert!(
-            fixture
-                .stats_registry
-                .lookup(LAST_COMPACTION_TS_SEC)
-                .unwrap()
-                .get()
-                > starting_last_ts
-        );
+        let ending_last_ts = {
+            let snapshot = fixture.metrics_recorder.snapshot();
+            let metric = snapshot
+                .by_name("slatedb.compactor.last_compaction_timestamp_sec")
+                .into_iter()
+                .next()
+                .expect("metric not found");
+            match &metric.value {
+                MetricValue::Gauge(v) => *v,
+                other => panic!("expected Gauge, got {:?}", other),
+            }
+        };
+        assert!(ending_last_ts > starting_last_ts);
     }
 
     #[tokio::test]
@@ -3280,8 +3271,8 @@ mod tests {
         let scheduler = Arc::new(MockScheduler::new());
         let executor = Arc::new(MockExecutor::new());
         let rand = Arc::new(DbRand::default());
-        let stats_registry = Arc::new(StatRegistry::new());
-        let compactor_stats = Arc::new(CompactionStats::new(stats_registry));
+        let metrics_recorder = DefaultMetricsRecorder::new();
+        let compactor_stats = Arc::new(CompactionStats::new(&metrics_recorder));
         let mut handler = CompactorEventHandler::new(
             manifest_store,
             compactions_store.clone(),
@@ -3501,7 +3492,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(feature = "zstd")]
     async fn test_compactor_compressed_block_size() {
-        use crate::compactor::stats::BYTES_COMPACTED;
         use crate::config::{CompressionCodec, SstBlockSize};
 
         // given:
@@ -3548,7 +3538,10 @@ mod tests {
 
         // then:
         let metrics = db.metrics();
-        let bytes_compacted = metrics.lookup(BYTES_COMPACTED).unwrap().get();
+        let bytes_compacted = match metrics.by_name("slatedb.compactor.bytes_compacted")[0].value {
+            MetricValue::Counter(v) => v,
+            _ => panic!("expected counter"),
+        };
 
         assert!(bytes_compacted > 0, "bytes_compacted: {}", bytes_compacted);
     }

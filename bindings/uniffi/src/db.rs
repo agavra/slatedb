@@ -31,13 +31,32 @@ impl Db {
         self.inner.status().map_err(Into::into)
     }
 
-    /// Returns a snapshot of the current integer metrics registry.
+    /// Returns a snapshot of the current metrics as a map of name to value.
+    /// Counter and gauge values are returned as i64. Histogram metrics are omitted.
     pub fn metrics(&self) -> Result<HashMap<String, i64>, Error> {
-        let registry = self.inner.metrics();
+        let metrics = self.inner.metrics();
         let mut snapshot = HashMap::new();
-        for name in registry.names() {
-            if let Some(stat) = registry.lookup(name) {
-                snapshot.insert(name.to_owned(), stat.get());
+        for metric in metrics.all() {
+            let key = if metric.labels.is_empty() {
+                metric.name.clone()
+            } else {
+                let label_str: Vec<String> = metric
+                    .labels
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
+                format!("{}[{}]", metric.name, label_str.join(","))
+            };
+            match &metric.value {
+                slatedb::metrics::MetricValue::Counter(v) => {
+                    snapshot.insert(key, *v as i64);
+                }
+                slatedb::metrics::MetricValue::Gauge(v) => {
+                    snapshot.insert(key, *v as i64);
+                }
+                slatedb::metrics::MetricValue::Histogram { .. } => {
+                    // Histograms are not representable as a single i64
+                }
             }
         }
         Ok(snapshot)

@@ -13,12 +13,12 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::MergeOperatorType;
+use crate::metrics::DefaultMetricsRecorder;
 use crate::oracle::DbReaderOracle;
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::{DbStateReader, Reader};
 use crate::sst_iter::SstIteratorOptions;
-use crate::stats::StatRegistry;
 use crate::store_provider::StoreProvider;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
@@ -139,8 +139,8 @@ impl DbReaderInner {
             .max(initial_state.core().last_l0_seq);
         let oracle = Arc::new(DbReaderOracle::new(initial_durable_seq));
 
-        let stat_registry = Arc::new(StatRegistry::new());
-        let db_stats = DbStats::new(stat_registry.as_ref());
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db_stats = DbStats::new(recorder.as_ref());
 
         let state = RwLock::new(initial_state);
         let reader = Reader {
@@ -1084,6 +1084,7 @@ mod tests {
     use crate::manifest::Manifest;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::merge_operator::MergeOperatorType;
+    use crate::metrics::DefaultMetricsRecorder;
     use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::paths::PathResolver;
@@ -1091,7 +1092,6 @@ mod tests {
     use crate::proptest_util::sample;
     use crate::rand::DbRand;
     use crate::reader::Reader;
-    use crate::stats::StatRegistry;
     use crate::store_provider::StoreProvider;
     use crate::tablestore::TableStore;
     use crate::types::RowEntry;
@@ -2076,10 +2076,10 @@ mod tests {
         // Construct just enough DbReaderInner state to call rebuild_checkpoint_state()
         // directly. skip_wal_replay keeps the test scoped to the IMM retention logic.
         let oracle = Arc::new(DbReaderOracle::new(0));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
+            db_stats: DbStats::new(recorder.as_ref()),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,
@@ -2167,10 +2167,10 @@ mod tests {
         };
 
         let oracle = Arc::new(DbReaderOracle::new(0));
-        let stat_registry = Arc::new(StatRegistry::new());
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
         let reader = Reader {
             table_store: Arc::clone(&table_store),
-            db_stats: DbStats::new(stat_registry.as_ref()),
+            db_stats: DbStats::new(recorder.as_ref()),
             mono_clock: Arc::new(MonotonicClock::new(
                 test_provider.system_clock.clone(),
                 i64::MIN,

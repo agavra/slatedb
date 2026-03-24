@@ -27,9 +27,9 @@ use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
+use crate::metrics::DefaultMetricsRecorder;
 use crate::object_stores::ObjectStores;
 use crate::rand::DbRand;
-use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
@@ -325,8 +325,8 @@ impl CompactionExecuteBench {
         ));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let compactor_options = CompactorOptions::default();
-        let registry = Arc::new(StatRegistry::new());
-        let stats = Arc::new(CompactionStats::new(registry.clone()));
+        let recorder = DefaultMetricsRecorder::new();
+        let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();
 
         let manifest_store = Arc::new(ManifestStore::new(&self.path, os.clone()));
