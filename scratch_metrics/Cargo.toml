@@ -10,3 +10,4 @@ publish = false
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
 prometheus-client = "0.24"
+metrics = "0.24"

@@ -50,7 +50,7 @@ pub trait HistogramFn: Send + Sync {
 // Default (atomic-backed) recorder — always present for db.metrics()
 // ============================================================================
 
-pub struct DefaultCounter(AtomicU64);
+pub struct DefaultCounter(pub AtomicU64);
 impl CounterFn for DefaultCounter {
     fn increment(&self, value: u64) {
         self.0.fetch_add(value, Ordering::Relaxed);
