@@ -93,11 +93,21 @@ path = "src/standalone_compactor.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "prometheus-metrics"
+path = "src/prometheus_metrics.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 object_store = { workspace = true, features = ["azure", "gcp"] }
+prometheus-client = "0.23"
 slatedb.workspace = true
-tokio = { workspace = true, features = ["macros", "signal"] }
+tokio = { workspace = true, features = ["macros", "signal", "net"] }
 tracing-subscriber.workspace = true
 
 [lints]
