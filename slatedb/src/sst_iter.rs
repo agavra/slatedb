@@ -392,44 +392,12 @@ impl<'a> InternalSstIterator<'a> {
         init_optional_iterator(iter).await
     }
 
-    fn last_block_with_data_including_key(index: &SsTableIndex, key: &[u8]) -> Option<usize> {
-        partitioned_keyspace::last_partition_including_key(index, key)
-    }
-
-    fn first_block_with_data_including_or_after_key(index: &SsTableIndex, key: &[u8]) -> usize {
-        partitioned_keyspace::first_partition_including_or_after_key(index, key)
-    }
-
     fn blocks_covering_view(index: &SsTableIndex, view: &SstView) -> Range<usize> {
-        let start_block_id = match view.start_key() {
-            Included(k) | Excluded(k) => {
-                Self::first_block_with_data_including_or_after_key(index, k)
-            }
-            Unbounded => 0,
+        let range = match view {
+            SstView::Owned(_, r) => r,
+            SstView::Borrowed(_, r) => r,
         };
-
-        let end_block_id_exclusive = match view.end_key() {
-            Included(k) => Self::last_block_with_data_including_key(index, k)
-                .map(|b| b + 1)
-                .unwrap_or(start_block_id),
-            Excluded(k) => {
-                let block_index = Self::last_block_with_data_including_key(index, k);
-                match block_index {
-                    None => start_block_id,
-                    Some(block_index) => {
-                        let block = index.block_meta().get(block_index);
-                        if k == block.first_key().bytes() {
-                            block_index
-                        } else {
-                            block_index + 1
-                        }
-                    }
-                }
-            }
-            Unbounded => index.block_meta().len(),
-        };
-
-        start_block_id..end_block_id_exclusive
+        partitioned_keyspace::blocks_covering_range(index, range)
     }
 
     /// Spawns fetch tasks for blocks based on iteration order.
@@ -787,10 +755,13 @@ impl RowEntryIterator for InternalSstIterator<'_> {
             // For ascending order, find the first block with or after the key
             let block_idx = match self.options.order {
                 IterationOrder::Ascending => {
-                    Self::first_block_with_data_including_or_after_key(&index.borrow(), next_key)
+                    partitioned_keyspace::first_partition_including_or_after_key(
+                        &index.borrow(),
+                        next_key,
+                    )
                 }
                 IterationOrder::Descending => {
-                    Self::last_block_with_data_including_key(&index.borrow(), next_key)
+                    partitioned_keyspace::last_partition_including_key(&index.borrow(), next_key)
                         .unwrap_or(self.block_idx_range.start)
                 }
             };

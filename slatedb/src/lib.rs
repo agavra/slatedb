@@ -33,6 +33,7 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
+pub use cache_manager::CacheManager;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
 #[cfg(feature = "compaction_filters")]
@@ -87,6 +88,7 @@ mod block_iterator_v2;
 #[cfg(any(test, feature = "bencher"))]
 mod bytes_generator;
 mod bytes_range;
+mod cache_manager;
 mod checkpoint;
 mod clone;
 #[cfg(feature = "compaction_filters")]

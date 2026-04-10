@@ -115,6 +115,9 @@ use tokio::runtime::Handle;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
+use crate::cache_manager::{
+    CacheManager, CacheManagerMessage, CacheManagerWorker, CACHE_MANAGER_TASK_NAME,
+};
 use crate::cached_object_store::CachedObjectStore;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
@@ -514,6 +517,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // with the executor and future channel construction.
         let manifest_dirty = manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new(manifest_dirty.value.core.last_l0_seq);
+        status_manager.report_manifest(manifest_dirty.value.core.clone());
 
         // Setup communication channels wired to the shared closed state.
         let reader = status_manager.result_reader();
@@ -628,6 +632,41 @@ impl<P: Into<Path>> DbBuilder<P> {
             task_executor.add_handler(GC_TASK_NAME.to_string(), Box::new(gc), rx, gc_handle)?;
         }
 
+        // Start the cache manager if block cache is configured and enabled.
+        let cache_manager_handle = if self.db_cache.is_some() && self.settings.cache_manager_enabled
+        {
+            let manifest_rx = inner.status_manager.subscribe();
+            let (cm_tx, cm_rx) = async_channel::unbounded();
+            let handle = CacheManager::new(cm_tx.clone());
+            let worker = CacheManagerWorker::new(
+                table_store.clone(),
+                self.settings.cache_eviction_enabled,
+                manifest_rx.clone(),
+            );
+            // Bridge: watch manifest changes → channel messages
+            tokio_handle.spawn(async move {
+                let mut rx = manifest_rx;
+                while rx.changed().await.is_ok() {
+                    if cm_tx
+                        .send(CacheManagerMessage::ManifestChanged)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            task_executor.add_handler(
+                CACHE_MANAGER_TASK_NAME.to_string(),
+                Box::new(worker),
+                cm_rx,
+                &tokio_handle,
+            )?;
+            Some(handle)
+        } else {
+            None
+        };
+
         // Start the memtable flusher before WAL replay so that
         // replayed immutable memtables can be flushed concurrently.
         memtable_flusher.start(
@@ -655,6 +694,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         Ok(Db {
             inner,
             task_executor,
+            cache_manager_handle,
         })
     }
 }

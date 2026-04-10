@@ -31,6 +31,7 @@ use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 use object_store::{parse_url_opts, ObjectStore};
 
+use crate::cache_manager::{CacheManager, CACHE_MANAGER_TASK_NAME};
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
@@ -590,6 +591,7 @@ impl DbInner {
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     task_executor: Arc<MessageHandlerExecutor>,
+    cache_manager_handle: Option<CacheManager>,
 }
 
 impl Db {
@@ -708,6 +710,14 @@ impl Db {
 
         if let Err(e) = self.task_executor.shutdown_task(GC_TASK_NAME).await {
             warn!("failed to shutdown garbage collector task [error={:?}]", e);
+        }
+
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(CACHE_MANAGER_TASK_NAME)
+            .await
+        {
+            warn!("failed to shutdown cache manager task [error={:?}]", e);
         }
 
         if let Err(e) = self
@@ -1513,6 +1523,12 @@ impl Db {
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
         self.inner.state.read().state().core().clone()
+    }
+
+    /// Returns `None` when the SlateDB block cache is disabled or the
+    /// cache manager is disabled.
+    pub fn cache_manager(&self) -> Option<CacheManager> {
+        self.cache_manager_handle.clone()
     }
 
     /// Subscribe to database state changes.
@@ -5621,6 +5637,8 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             default_ttl: ttl,
+            cache_manager_enabled: true,
+            cache_eviction_enabled: true,
             block_format: None,
         }
     }

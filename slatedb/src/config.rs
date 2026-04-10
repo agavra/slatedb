@@ -196,6 +196,10 @@ use crate::error::SlateDBError;
 
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum PreloadLevel {
@@ -680,6 +684,17 @@ pub struct Settings {
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
 
+    /// Disables the cache manager even if a block cache is configured.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub cache_manager_enabled: bool,
+
+    /// Disables best-effort eviction of block-cache entries for SSTs
+    /// removed from the manifest. Warming still works when this is
+    /// `false`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub cache_eviction_enabled: bool,
+
     /// The block format for SST files. This is only available in tests
     /// to verify backward compatibility between V1 and V2 formats.
     #[cfg(test)]
@@ -713,7 +728,9 @@ impl std::fmt::Debug for Settings {
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("filter_bits_per_key", &self.filter_bits_per_key)
-            .field("default_ttl", &self.default_ttl);
+            .field("default_ttl", &self.default_ttl)
+            .field("cache_manager_enabled", &self.cache_manager_enabled)
+            .field("cache_eviction_enabled", &self.cache_eviction_enabled);
         data.finish()
     }
 }
@@ -909,6 +926,8 @@ impl Default for Settings {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             filter_bits_per_key: 10,
             default_ttl: None,
+            cache_manager_enabled: true,
+            cache_eviction_enabled: true,
             #[cfg(test)]
             block_format: None,
         }

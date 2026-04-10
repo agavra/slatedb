@@ -1,5 +1,6 @@
 use tokio::sync::watch;
 
+use crate::db_state::ManifestCore;
 use crate::error::SlateDBError;
 use crate::utils::WatchableOnceCell;
 use crate::CloseReason;
@@ -10,12 +11,14 @@ use crate::CloseReason;
 /// always reflects the latest state. When the database is dropped the watch
 /// channel closes and [`changed()`](tokio::sync::watch::Receiver::changed)
 /// returns an error.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DbStatus {
     /// The durable sequence number. All writes with a sequence number less
     /// than or equal to this value are durably persisted to object storage
     /// and will survive process restarts.
     pub durable_seq: u64,
+    /// The current manifest state, if available.
+    pub current_manifest: Option<ManifestCore>,
     /// Set once the database has been closed, indicating the reason.
     pub close_reason: Option<CloseReason>,
 }
@@ -37,6 +40,7 @@ impl DbStatusManager {
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
+            current_manifest: None,
             close_reason: None,
         });
         Self {
@@ -49,6 +53,17 @@ impl DbStatusManager {
         self.tx.send_if_modified(|s| {
             if seq > s.durable_seq {
                 s.durable_seq = seq;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(crate) fn report_manifest(&self, core: ManifestCore) {
+        self.tx.send_if_modified(|s| {
+            if s.current_manifest.as_ref() != Some(&core) {
+                s.current_manifest = Some(core);
                 true
             } else {
                 false

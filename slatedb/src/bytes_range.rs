@@ -121,7 +121,6 @@ impl BytesRange {
         None
     }
 
-    #[cfg(test)]
     pub(crate) fn from_ref<K, T>(range: T) -> Self
     where
         K: AsRef<[u8]>,

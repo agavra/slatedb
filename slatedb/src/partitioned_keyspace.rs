@@ -1,3 +1,8 @@
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::{Range, RangeBounds};
+
+use bytes::Bytes;
+
 /// Represents a set of keys that are partitioned into multiple partitions, where each
 /// partition stores some range of keys and the keys in a given partition are greater than
 /// or equal to all keys from the previous partitions. The space is a multiset, so a given key
@@ -78,6 +83,40 @@ pub(crate) fn last_partition_including_key<T: RangePartitionedKeySpace>(
         return None;
     }
     Some(part_point - 1)
+}
+
+/// Returns the range of partition indices whose keys overlap with the given range.
+/// This is the shared logic used by both the SST iterator and cache manager.
+pub(crate) fn blocks_covering_range<T: RangePartitionedKeySpace>(
+    keyspace: &T,
+    range: &impl RangeBounds<Bytes>,
+) -> Range<usize> {
+    let start_block_id = match range.start_bound() {
+        Included(k) | Excluded(k) => first_partition_including_or_after_key(keyspace, k),
+        Unbounded => 0,
+    };
+
+    let end_block_id_exclusive = match range.end_bound() {
+        Included(k) => last_partition_including_key(keyspace, k)
+            .map(|b| b + 1)
+            .unwrap_or(start_block_id),
+        Excluded(k) => {
+            let block_index = last_partition_including_key(keyspace, k);
+            match block_index {
+                None => start_block_id,
+                Some(block_index) => {
+                    if k.as_ref() == keyspace.partition_first_key(block_index) {
+                        block_index
+                    } else {
+                        block_index + 1
+                    }
+                }
+            }
+        }
+        Unbounded => keyspace.partitions(),
+    };
+
+    start_block_id..end_block_id_exclusive
 }
 
 #[cfg(test)]

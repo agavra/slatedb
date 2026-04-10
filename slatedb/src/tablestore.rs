@@ -577,6 +577,34 @@ impl TableStore {
         Ok(blocks_read)
     }
 
+    /// Removes all cached entries for a physical SST: data blocks, index, filter, and stats.
+    pub(crate) async fn remove_sst_from_cache(
+        &self,
+        handle: &SsTableHandle,
+        index: &SsTableIndexOwned,
+    ) {
+        if let Some(ref cache) = self.cache {
+            let index_borrowed = index.borrow();
+            for block_num in 0..index_borrowed.block_meta().len() {
+                let offset = index_borrowed.block_meta().get(block_num).offset();
+                cache.remove(&(handle.id, offset).into()).await;
+            }
+            cache
+                .remove(&(handle.id, handle.info.index_offset).into())
+                .await;
+            if handle.info.filter_len > 0 {
+                cache
+                    .remove(&(handle.id, handle.info.filter_offset).into())
+                    .await;
+            }
+            if handle.info.stats_len > 0 {
+                cache
+                    .remove(&(handle.id, handle.info.stats_offset).into())
+                    .await;
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) async fn read_block(
         &self,

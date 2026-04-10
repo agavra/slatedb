@@ -554,10 +554,10 @@ impl ManifestWriterHandler {
     ) {
         let mut wguard_state = self.db.state.write();
         wguard_state.merge_remote_manifest(remote_dirty);
-        self.db
-            .db_stats
-            .l0_sst_count
-            .set(wguard_state.state().core().l0.len() as i64);
+        let state = wguard_state.state();
+        let core = state.core();
+        self.db.db_stats.l0_sst_count.set(core.l0.len() as i64);
+        self.db.status_manager.report_manifest(core.clone());
     }
 
     async fn write_checkpoint_safely(

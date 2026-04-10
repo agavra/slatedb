@@ -142,9 +142,7 @@ pub trait DbCache: Send + Sync {
     async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
     async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error>;
     async fn insert(&self, key: CachedKey, value: CachedEntry);
-    #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey);
-    #[allow(dead_code)]
     fn entry_count(&self) -> u64;
 }
 
@@ -379,7 +377,6 @@ impl DbCache for SplitCache {
         }
     }
 
-    #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey) {
         // Because `CachedKey` is uniquely identified by (scope ID, SST ID, offset), given a
         // `CachedKey`, it will only appear in the block cache or meta cache, which is safe and
@@ -547,7 +544,6 @@ impl DbCache for DbCacheWrapper {
         self.cache.insert(scoped_key, value).await
     }
 
-    #[allow(dead_code)]
     async fn remove(&self, key: &CachedKey) {
         let scoped_key = self.scoped_key(key);
         self.cache.remove(&scoped_key).await
