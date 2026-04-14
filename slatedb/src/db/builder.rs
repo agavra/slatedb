@@ -642,6 +642,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 table_store.clone(),
                 self.settings.cache_eviction_enabled,
                 manifest_rx.clone(),
+                &recorder,
             );
             // Bridge: watch manifest changes → channel messages
             tokio_handle.spawn(async move {
