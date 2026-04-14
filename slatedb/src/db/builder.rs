@@ -1389,6 +1389,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_transformer: self.block_transformer.clone(),
         };
 
+        let has_block_cache = self.db_cache.is_some();
         let reader = DbReader::open_internal(
             &store_provider,
             self.checkpoint_id,
@@ -1397,6 +1398,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.system_clock,
             self.rand,
             self.recorder,
+            has_block_cache,
         )
         .await
         .map_err(crate::Error::from)?;

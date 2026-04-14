@@ -969,6 +969,18 @@ pub struct DbReaderOptions {
     ///
     /// Defaults to false.
     pub skip_wal_replay: bool,
+
+    /// When true (default), automatically start the cache manager background
+    /// task if a block cache is configured. The cache manager warms and evicts
+    /// cache entries as the manifest changes.
+    #[serde(default = "default_true")]
+    pub cache_manager_enabled: bool,
+
+    /// When true (default), the cache manager will evict blocks for SSTs that
+    /// leave the manifest. Set to false to keep stale blocks in cache until
+    /// natural eviction.
+    #[serde(default = "default_true")]
+    pub cache_eviction_enabled: bool,
 }
 
 impl Default for DbReaderOptions {
@@ -979,6 +991,8 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
+            cache_manager_enabled: true,
+            cache_eviction_enabled: true,
         }
     }
 }

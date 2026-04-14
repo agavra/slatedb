@@ -1,4 +1,7 @@
 use crate::bytes_range::BytesRange;
+use crate::cache_manager::{
+    CacheManager, CacheManagerMessage, CacheManagerWorker, CACHE_MANAGER_TASK_NAME,
+};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
@@ -47,6 +50,7 @@ pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
 pub struct DbReader {
     inner: Arc<DbReaderInner>,
     task_executor: MessageHandlerExecutor,
+    cache_manager_handle: Option<CacheManager>,
 }
 
 struct DbReaderInner {
@@ -417,14 +421,12 @@ impl DbReaderInner {
             inner: Arc::clone(self),
         };
         let (_tx, rx) = async_channel::unbounded();
-        let result = task_executor.add_handler(
+        task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
             rx,
             &Handle::current(),
-        );
-        task_executor.monitor_on(&Handle::current())?;
-        result
+        )
     }
 
     async fn replay_wal_into(
@@ -684,8 +686,12 @@ impl DbReader {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        has_block_cache: bool,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(&options)?;
+
+        let cache_manager_enabled = options.cache_manager_enabled;
+        let cache_eviction_enabled = options.cache_eviction_enabled;
 
         let status_manager = DbStatusManager::new(0);
         let task_executor =
@@ -695,14 +701,14 @@ impl DbReader {
         let inner = Arc::new(
             DbReaderInner::new(
                 manifest_store,
-                table_store,
+                table_store.clone(),
                 options,
                 checkpoint_id,
                 merge_operator,
-                status_manager,
+                status_manager.clone(),
                 system_clock,
                 rand,
-                recorder,
+                recorder.clone(),
             )
             .await?,
         );
@@ -710,13 +716,59 @@ impl DbReader {
         // If no checkpoint was provided, then we have established a new checkpoint
         // from the latest state, and we need to refresh it according to the params
         // of `DbReaderOptions`.
+        let mut has_handlers = false;
         if checkpoint_id.is_none() {
             inner.spawn_manifest_poller(&task_executor)?;
+            has_handlers = true;
+        }
+
+        // Start the cache manager if block cache is configured, enabled, and
+        // we are polling for manifest changes (no fixed checkpoint).
+        let cache_manager_handle =
+            if checkpoint_id.is_none() && has_block_cache && cache_manager_enabled {
+                let manifest_rx = status_manager.subscribe();
+                let (cm_tx, cm_rx) = async_channel::unbounded();
+                let handle = CacheManager::new(cm_tx.clone());
+                let worker = CacheManagerWorker::new(
+                    table_store,
+                    cache_eviction_enabled,
+                    manifest_rx.clone(),
+                    &recorder,
+                );
+                // Bridge: watch manifest changes → channel messages
+                tokio::spawn(async move {
+                    let mut rx = manifest_rx;
+                    while rx.changed().await.is_ok() {
+                        if cm_tx
+                            .send(CacheManagerMessage::ManifestChanged)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                task_executor.add_handler(
+                    CACHE_MANAGER_TASK_NAME.to_string(),
+                    Box::new(worker),
+                    cm_rx,
+                    &Handle::current(),
+                )?;
+                Some(handle)
+            } else {
+                None
+            };
+
+        // Monitor background tasks — must be called after all handlers
+        // are registered.
+        if has_handlers {
+            task_executor.monitor_on(&Handle::current())?;
         }
 
         Ok(Self {
             inner,
             task_executor,
+            cache_manager_handle,
         })
     }
 
@@ -1027,6 +1079,12 @@ impl DbReader {
             .map_err(Into::into)
     }
 
+    /// Returns `None` when the SlateDB block cache is disabled or the
+    /// cache manager is disabled.
+    pub fn cache_manager(&self) -> Option<CacheManager> {
+        self.cache_manager_handle.clone()
+    }
+
     /// Subscribe to database status changes.
     ///
     /// See [`Db::subscribe`](crate::Db::subscribe) for full semantics and
@@ -1190,6 +1248,7 @@ mod tests {
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
             slatedb_common::metrics::MetricsRecorderHelper::noop(),
+            false,
         )
         .await
         .unwrap();
@@ -1938,6 +1997,7 @@ mod tests {
                 self.system_clock.clone(),
                 self.rand.clone(),
                 slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                false,
             )
             .await
         }
