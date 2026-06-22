@@ -115,3 +115,16 @@ argument:
 ```bash
 cargo run -r --package slatedb-bencher -- compaction run --compaction-sources="1,2"
 ```
+
+By default the `run` subcommand splits the compaction into up to 4
+subcompactions (RFC-0028) that execute concurrently over disjoint key ranges.
+Use `--max-subcompactions` to tune this; a value `<= 1` disables subcompactions
+and runs the compaction as a single range:
+
+```bash
+# Run the compaction whole (no subcompactions).
+cargo run -r --package slatedb-bencher -- compaction run --max-subcompactions 1
+
+# Split into up to 8 parallel subcompactions.
+cargo run -r --package slatedb-bencher -- compaction run --max-subcompactions 8
+```

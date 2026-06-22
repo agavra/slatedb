@@ -126,6 +126,7 @@ async fn exec_benchmark_compaction(
                     load_args.key_bytes,
                     load_args.val_bytes,
                     load_args.compression_codec,
+                    load_args.overlapping_ssts,
                 )
                 .await
                 .expect("failed to run load");
@@ -137,6 +138,9 @@ async fn exec_benchmark_compaction(
                     run_args.compaction_sources,
                     run_args.compaction_destination,
                     run_args.compression_codec,
+                    run_args.max_subcompactions,
+                    run_args.max_fetch_tasks,
+                    run_args.bytes_to_fetch,
                 )
                 .await
                 .expect("failed to run bench");

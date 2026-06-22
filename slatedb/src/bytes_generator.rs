@@ -9,7 +9,6 @@ pub(crate) struct OrderedBytesGenerator {
 }
 
 impl OrderedBytesGenerator {
-    #[cfg(any(feature = "bencher", test))]
     pub(crate) fn new_with_suffix(suffix: &[u8], bytes: &[u8]) -> Self {
         Self::new(suffix, bytes, u8::MIN, u8::MAX)
     }

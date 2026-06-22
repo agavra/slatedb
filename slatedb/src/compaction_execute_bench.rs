@@ -3,7 +3,7 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BufMut;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
@@ -14,7 +14,6 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
 
-use crate::bytes_generator::OrderedBytesGenerator;
 use crate::compaction_worker::WorkerMessage;
 use crate::compactor::stats::{CompactionStats, WorkerStats};
 use crate::compactor_executor::{
@@ -68,6 +67,7 @@ impl CompactionExecuteBench {
         key_bytes: usize,
         val_bytes: usize,
         compression_codec: Option<CompressionCodec>,
+        overlapping_ssts: usize,
     ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
             compression_codec,
@@ -81,8 +81,15 @@ impl CompactionExecuteBench {
             TableStoreKind::Main,
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
-        let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
-        self.rand.rng().fill_bytes(key_start.as_mut_slice());
+        // Key layout: [tile byte][big-endian counter][u32 SST id]. An SST spans a
+        // contiguous range of tile bytes; one that spans a single tile is a
+        // disjoint "base" SST, while the first `overlapping_ssts` span every tile
+        // and so overlap all of them (the merge "churn"). This models realistic
+        // compactions where most inputs are disjoint and only a small subset
+        // overlap, rather than every input overlapping every other.
+        let overlapping = overlapping_ssts.min(num_ssts);
+        let num_tiles = (num_ssts - overlapping).max(1);
+        assert!(num_tiles <= 256, "tile index must fit in one byte");
         let mut futures = FuturesUnordered::<JoinHandle<Result<(), SlateDBError>>>::new();
         for i in 0..num_ssts {
             while futures.len() >= 4 {
@@ -93,11 +100,18 @@ impl CompactionExecuteBench {
                     .expect("join failed")?;
             }
             let ts = table_store.clone();
-            let key_start_copy = key_start.clone();
+            let (tile_lo, tile_hi) = if i < overlapping {
+                (0u32, num_tiles as u32)
+            } else {
+                let tile = (i - overlapping) as u32;
+                (tile, tile + 1)
+            };
             let jh = tokio::spawn(CompactionExecuteBench::load_sst(
                 i as u32,
                 ts,
-                key_start_copy,
+                key_bytes,
+                tile_lo,
+                tile_hi,
                 num_keys,
                 val_bytes,
                 self.rand.clone(),
@@ -115,10 +129,31 @@ impl CompactionExecuteBench {
         Ok(())
     }
 
+    /// Builds a key `[tile byte][big-endian counter][u32 suffix]`: the tile byte
+    /// is the high-order range coordinate, the counter orders keys within a tile,
+    /// and the suffix is the SST id so keys never collide across SSTs.
+    fn make_key(key_bytes: usize, tile: u8, counter: u64, suffix: u32) -> Bytes {
+        let ctr_width = key_bytes - 1 - mem::size_of::<u32>();
+        let ctr_be = counter.to_be_bytes();
+        let mut key = BytesMut::with_capacity(key_bytes);
+        key.put_u8(tile);
+        if ctr_width >= ctr_be.len() {
+            key.put_bytes(0, ctr_width - ctr_be.len());
+            key.put_slice(&ctr_be);
+        } else {
+            key.put_slice(&ctr_be[ctr_be.len() - ctr_width..]);
+        }
+        key.put_u32(suffix);
+        key.freeze()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn load_sst(
         i: u32,
         table_store: Arc<TableStore>,
-        key_start: Vec<u8>,
+        key_bytes: usize,
+        tile_lo: u32,
+        tile_hi: u32,
         num_keys: usize,
         val_bytes: usize,
         rand: Arc<DbRand>,
@@ -129,7 +164,9 @@ impl CompactionExecuteBench {
             let result = CompactionExecuteBench::do_load_sst(
                 i,
                 table_store.clone(),
-                key_start.clone(),
+                key_bytes,
+                tile_lo,
+                tile_hi,
                 num_keys,
                 val_bytes,
                 system_clock.clone(),
@@ -154,27 +191,39 @@ impl CompactionExecuteBench {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn do_load_sst(
         i: u32,
         table_store: Arc<TableStore>,
-        key_start: Vec<u8>,
+        key_bytes: usize,
+        tile_lo: u32,
+        tile_hi: u32,
         num_keys: usize,
         val_bytes: usize,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
     ) -> Result<(), SlateDBError> {
         let start = system_clock.now();
-        let mut suffix = Vec::<u8>::new();
-        suffix.put_u32(i);
-        let mut key_gen =
-            OrderedBytesGenerator::new_with_suffix(suffix.as_ref(), key_start.as_slice());
+        // Spread `num_keys` over the SST's tile span. A single-tile SST is dense
+        // (stride 1); a multi-tile SST strides by its span so its keys cover the
+        // full counter range of every tile it spans, overlapping each one.
+        let num_buckets = (tile_hi - tile_lo).max(1) as u64;
+        let keys_per_bucket = num_keys / num_buckets as usize;
         let mut sst_writer = table_store.table_writer(CompactionExecuteBench::sst_id(i));
-        for _ in 0..num_keys {
-            let mut val = vec![0u8; val_bytes];
-            rand.rng().fill_bytes(val.as_mut_slice());
-            let key = key_gen.next();
-            let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
-            sst_writer.add(row_entry).await?;
+        for bucket in tile_lo..tile_hi {
+            for j in 0..keys_per_bucket {
+                let mut val = vec![0u8; val_bytes];
+                rand.rng().fill_bytes(val.as_mut_slice());
+                let key = CompactionExecuteBench::make_key(
+                    key_bytes,
+                    bucket as u8,
+                    j as u64 * num_buckets,
+                    i,
+                );
+                let row_entry =
+                    RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
+                sst_writer.add(row_entry).await?;
+            }
         }
         let sst = sst_writer.close().await?;
         let elapsed_ms = system_clock
@@ -320,6 +369,9 @@ impl CompactionExecuteBench {
         source_sr_ids: Option<Vec<u32>>,
         destination_sr_id: u32,
         compression_codec: Option<CompressionCodec>,
+        max_subcompactions: usize,
+        max_fetch_tasks: usize,
+        bytes_to_fetch: usize,
     ) -> Result<(), crate::Error> {
         let sst_format = SsTableFormat {
             compression_codec,
@@ -333,7 +385,17 @@ impl CompactionExecuteBench {
             TableStoreKind::Compactor,
         ));
         let (tx, rx) = async_channel::unbounded();
-        let worker_options = CompactionWorkerOptions::default();
+        // Split the compaction into subcompactions (RFC-0028) so the bench
+        // exercises the parallel-range path; `max_subcompactions <= 1` disables
+        // it and runs the compaction whole. `max_fetch_tasks`/`bytes_to_fetch`
+        // tune the per-iterator S3 read concurrency and read-ahead size so the
+        // bench can probe whether compaction throughput is I/O-concurrency bound.
+        let worker_options = CompactionWorkerOptions {
+            max_subcompactions,
+            max_fetch_tasks,
+            bytes_to_fetch,
+            ..CompactionWorkerOptions::default()
+        };
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CompactionStats::new(&recorder));
         let os = self.object_store.clone();

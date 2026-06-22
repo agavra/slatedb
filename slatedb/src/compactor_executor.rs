@@ -43,7 +43,7 @@ use crate::utils::{
     build_concurrent, compute_max_parallel, estimate_bytes_before_key, last_written_key_and_seq,
     spawn_bg_task, IdGenerator,
 };
-use log::{debug, error};
+use log::{debug, error, info};
 use tracing::instrument;
 use ulid::Ulid;
 
@@ -534,7 +534,7 @@ impl TokioCompactionExecutorInner {
         // that finishes before the first tick (the common case) sends nothing.
         let plan = self.load_manifest_and_plan(args);
         tokio::pin!(plan);
-        let (sequence_tracker, planned) = loop {
+        let (sequence_tracker, planned, manifest_ms, plan_ms) = loop {
             tokio::select! {
                 biased;
                 res = &mut plan => break res?,
@@ -553,22 +553,47 @@ impl TokioCompactionExecutorInner {
             }
         };
 
-        self.execute_compaction_job(id, destination, planned, sequence_tracker)
-            .await
+        // Phase timing (RFC-0028 diagnostics): manifest load and planning are
+        // measured inside `load_manifest_and_plan`; time the parallel merge here.
+        let exec_start = self.clock.now();
+        let result = self
+            .execute_compaction_job(id, destination, planned, sequence_tracker)
+            .await;
+        let now = self.clock.now();
+        info!(
+            "compaction phase timing [id={}, manifest_ms={}, plan_ms={}, execute_ms={}]",
+            id,
+            manifest_ms,
+            plan_ms,
+            now.signed_duration_since(exec_start).num_milliseconds(),
+        );
+        result
     }
 
     /// Loads the manifest's shared sequence tracker and plans the job's ranges
     /// (RFC-0028). Every range shares the one sequence tracker rather than
     /// re-reading the manifest.
+    ///
+    /// Also returns the manifest-load and planning durations (milliseconds) for
+    /// the per-phase timing diagnostics logged by the caller.
     async fn load_manifest_and_plan(
         &self,
         args: StartCompactionJobArgs,
-    ) -> Result<(Arc<SequenceTracker>, PlannedCompaction), SlateDBError> {
+    ) -> Result<(Arc<SequenceTracker>, PlannedCompaction, i64, i64), SlateDBError> {
+        let manifest_start = self.clock.now();
         let stored_manifest =
             StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
         let sequence_tracker = Arc::new(stored_manifest.db_state().sequence_tracker.clone());
+        let plan_start = self.clock.now();
         let planned = self.plan_compaction_job(args).await?;
-        Ok((sequence_tracker, planned))
+        let plan_end = self.clock.now();
+        let manifest_ms = plan_start
+            .signed_duration_since(manifest_start)
+            .num_milliseconds();
+        let plan_ms = plan_end
+            .signed_duration_since(plan_start)
+            .num_milliseconds();
+        Ok((sequence_tracker, planned, manifest_ms, plan_ms))
     }
 
     /// Plans the subcompaction ranges for a fresh job (RFC-0028).

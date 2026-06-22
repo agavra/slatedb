@@ -312,6 +312,13 @@ pub(crate) struct CompactionLoadArgs {
         help = "Compression codec to use. If set, must `snappy`, `zlib`, `lz4`, or `zstd` (with the `--features` set)."
     )]
     pub(crate) compression_codec: Option<CompressionCodec>,
+
+    #[arg(
+        long,
+        help = "How many of --num-ssts span the entire key space (overlapping every other SST); the rest each cover a disjoint tile. 0 = fully tiled (non-overlapping), --num-ssts = fully overlapping. Models realistic compactions where only a small subset of inputs overlap.",
+        default_value_t = 0
+    )]
+    pub(crate) overlapping_ssts: usize,
 }
 
 #[derive(Args, Clone)]
@@ -337,6 +344,27 @@ pub(crate) struct CompactionRunArgs {
 
     #[arg(long, help = "Compression codec to use.")]
     pub(crate) compression_codec: Option<CompressionCodec>,
+
+    #[arg(
+        long,
+        help = "Maximum number of subcompactions to split the compaction into (RFC-0028). Each covers a disjoint sub-range and runs concurrently. Values <= 1 disable subcompactions.",
+        default_value_t = 4
+    )]
+    pub(crate) max_subcompactions: usize,
+
+    #[arg(
+        long,
+        help = "Per-SST-iterator read concurrency (object-store fetch tasks). Raise to probe whether compaction throughput is read-concurrency bound.",
+        default_value_t = 4
+    )]
+    pub(crate) max_fetch_tasks: usize,
+
+    #[arg(
+        long,
+        help = "Read-ahead size in bytes per iterator. Larger reads mean fewer object-store round trips.",
+        default_value_t = 2 * 1024 * 1024
+    )]
+    pub(crate) bytes_to_fetch: usize,
 }
 
 #[derive(Args, Clone)]
