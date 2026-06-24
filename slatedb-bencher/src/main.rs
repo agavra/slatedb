@@ -30,6 +30,7 @@ use transactions::TransactionBench;
 
 mod args;
 pub mod db;
+pub mod db_bench;
 pub mod stats;
 pub mod system_monitor;
 pub mod transactions;
@@ -60,6 +61,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.command {
         BencherCommands::Db(subcommand_args) => {
             exec_benchmark_db(path.clone(), object_store.clone(), subcommand_args).await;
+        }
+        BencherCommands::DbBench(subcommand_args) => {
+            db_bench::exec(path.clone(), object_store.clone(), subcommand_args).await;
         }
         BencherCommands::Compaction(subcommand_args) => {
             exec_benchmark_compaction(path.clone(), object_store.clone(), subcommand_args).await;

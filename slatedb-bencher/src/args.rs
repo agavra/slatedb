@@ -51,6 +51,7 @@ pub(crate) struct BencherArgs {
 #[derive(Subcommand, Clone)]
 pub(crate) enum BencherCommands {
     Db(BenchmarkDbArgs),
+    DbBench(DbBenchArgs),
     Compaction(BenchmarkCompactionArgs),
     Transaction(BenchmarkTransactionArgs),
 }
@@ -112,6 +113,191 @@ impl DbArgs {
 
         Ok((settings, memory_cache))
     }
+}
+
+/// Cache configuration for the `db-bench` workloads, mirroring RocksDB-on-NVMe:
+/// an on-disk `CachedObjectStore` holding the (compressed) SSTs plus an in-memory
+/// Foyer block cache holding decompressed blocks.
+#[derive(Args, Clone)]
+pub(crate) struct CacheArgs {
+    #[arg(
+        long,
+        help = "Size in bytes of the in-memory block cache (Foyer). Defaults to RocksDB's benchmark CACHE_SIZE (6 GiB).",
+        default_value_t = 6_442_450_944
+    )]
+    pub(crate) mem_cache_size: u64,
+
+    #[arg(
+        long,
+        help = "Size in bytes of the on-disk object cache (CachedObjectStore). Size this >= the compressed dataset so warm reads never hit object storage.",
+        default_value_t = 16 * 1024 * 1024 * 1024
+    )]
+    pub(crate) disk_cache_size: u64,
+
+    #[arg(
+        long,
+        help = "Directory for the on-disk object cache. Persists across phase invocations.",
+        default_value = "/tmp/slatedb-bencher-cache"
+    )]
+    pub(crate) disk_cache_dir: PathBuf,
+
+    #[arg(
+        long,
+        help = "Part size in bytes for the on-disk object cache (must be a multiple of 1KiB).",
+        default_value_t = 4 * 1024 * 1024
+    )]
+    pub(crate) part_size_bytes: usize,
+
+    #[arg(
+        long,
+        help = "Populate the on-disk cache on writes, so the load phase warms it (avoids a separate read warmup).",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub(crate) cache_puts: bool,
+}
+
+/// RocksDB-style `db_bench` workloads. Each phase is run as a separate invocation
+/// against the same object-store path, mirroring `benchmark.sh <phase>`.
+#[derive(Args, Clone)]
+#[command(about = "Run RocksDB-style db_bench workloads against SlateDB.")]
+pub(crate) struct DbBenchArgs {
+    #[clap(flatten)]
+    pub(crate) cache: CacheArgs,
+
+    #[arg(
+        long,
+        help = "Optional path to load the SlateDB configuration from. `Slatedb.toml` is used by default."
+    )]
+    pub(crate) db_options_path: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "SST compression codec: 'snappy', 'zlib', 'lz4', or 'zstd'. Defaults to none."
+    )]
+    pub(crate) compression_codec: Option<CompressionCodec>,
+
+    #[arg(
+        long,
+        help = "Target fraction a value compresses to (1.0 = incompressible/random, 0.5 = compresses to ~half). Mirrors db_bench --compression_ratio.",
+        default_value_t = 1.0
+    )]
+    pub(crate) compression_ratio: f64,
+
+    #[arg(
+        long,
+        help = "The size of the dataset in number of keys.",
+        default_value_t = 1_000_000
+    )]
+    pub(crate) num_keys: u64,
+
+    #[arg(
+        long,
+        help = "The length of the keys to generate (must be >= 8).",
+        default_value_t = 16
+    )]
+    pub(crate) key_len: usize,
+
+    #[arg(
+        long,
+        help = "The length of the values to generate.",
+        default_value_t = 1024
+    )]
+    pub(crate) val_len: usize,
+
+    #[arg(
+        long,
+        help = "The number of concurrent reader/writer tasks.",
+        default_value_t = 4
+    )]
+    pub(crate) concurrency: u32,
+
+    #[arg(
+        long,
+        help = "Seed for deterministic key generation. Must match across load and read phases.",
+        default_value_t = 0
+    )]
+    pub(crate) seed: u64,
+
+    #[arg(
+        long,
+        help = "Whether to await durable writes.",
+        default_value_t = false
+    )]
+    pub(crate) await_durable: bool,
+
+    #[arg(
+        long,
+        help = "Preload all SSTs into the on-disk cache at DB open (PreloadLevel::AllSst), so reads start warm.",
+        default_value_t = false
+    )]
+    pub(crate) preload: bool,
+
+    #[command(subcommand)]
+    pub(crate) phase: DbBenchPhase,
+}
+
+#[derive(Subcommand, Clone)]
+pub(crate) enum DbBenchPhase {
+    #[command(about = "fillrandom: write `num_keys` entries across the key space.")]
+    Load,
+    #[command(about = "readrandom: random point lookups of existing keys.")]
+    ReadRandom(ReadPhaseArgs),
+    #[command(about = "overwrite: random updates to existing keys.")]
+    Overwrite(DurationArg),
+    #[command(about = "readwhilewriting: readers plus one rate-limited writer.")]
+    ReadWhileWriting(ReadWhileWritingArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct DurationArg {
+    #[arg(
+        long,
+        help = "The duration in seconds to run the phase for.",
+        default_value_t = 30
+    )]
+    pub(crate) duration: u32,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct ReadPhaseArgs {
+    #[arg(
+        long,
+        help = "The duration in seconds to run the phase for.",
+        default_value_t = 30
+    )]
+    pub(crate) duration: u32,
+
+    #[arg(
+        long,
+        help = "Read every key once before measuring, to populate the cache.",
+        default_value_t = false
+    )]
+    pub(crate) warmup: bool,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct ReadWhileWritingArgs {
+    #[arg(
+        long,
+        help = "The duration in seconds to run the phase for.",
+        default_value_t = 30
+    )]
+    pub(crate) duration: u32,
+
+    #[arg(
+        long,
+        help = "The writer's target write rate in MiB/s.",
+        default_value_t = 2
+    )]
+    pub(crate) mb_per_sec: u64,
+
+    #[arg(
+        long,
+        help = "Read every key once before measuring, to populate the cache.",
+        default_value_t = false
+    )]
+    pub(crate) warmup: bool,
 }
 
 #[derive(Args, Clone)]
